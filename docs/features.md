@@ -1,5 +1,16 @@
 # Features
 
+## Project Foundation
+
+- [x] Project documentation (README, architecture, features)
+- [x] Rust project skeleton (Cargo.toml, module structure)
+- [x] CLI entrypoint with clap (mount, unmount, status, pin, unpin, config)
+- [x] Error type definition (thiserror)
+- [x] Config struct (serde + toml)
+- [x] Logging setup (tracing + tracing-subscriber)
+- [x] CI pipeline (GitHub Actions: fmt, clippy, build, test)
+- [x] Stub modules (fuse, db, cache, backend/nextcloud)
+
 ## Filesystem
 
 - [ ] FUSE mount (present cloud file tree at a specified directory)
