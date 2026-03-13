@@ -6,6 +6,7 @@ pub mod db;
 pub mod error;
 #[cfg(target_os = "linux")]
 pub mod fuse;
+pub mod sync;
 
 use cli::Command;
 use error::Result;
