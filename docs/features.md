@@ -11,6 +11,37 @@
 - [x] CI pipeline (GitHub Actions: fmt, clippy, build, test)
 - [x] Stub modules (fuse, db, cache, backend/nextcloud)
 
+## Metadata DB
+
+- [x] SQLite metadata store (inode-based file tree, WAL mode)
+- [x] CRUD operations (insert, lookup, list_children, update, delete)
+- [x] Sync state tracking (synced, pending_upload, pending_download, conflict)
+- [x] Pin / cache flag management
+
+## Backend
+
+- [x] Backend trait abstraction (list_dir, get_metadata, download, upload, delete, move, mkdir)
+- [x] RemoteEntry → NewFileEntry conversion
+- [x] Nextcloud WebDAV client (PROPFIND, GET, PUT, DELETE, MOVE, MKCOL)
+- [x] WebDAV XML parser (multistatus, resourcetype, checksums)
+- [x] Integration tests with wiremock
+
+## Sync Engine
+
+- [x] Initial full metadata sync (server → local DB)
+- [x] Incremental sync with ETag-based change detection
+- [x] Reconciler (insert new, update changed, delete removed entries)
+- [x] Recursive directory traversal
+- [x] Sync report (counts for inserted, updated, deleted, errors)
+
+## Cache Management
+
+- [x] LRU eviction (configurable capacity limit)
+- [x] Pinned files excluded from eviction
+- [x] Cache file storage ({cache_dir}/{inode})
+- [x] Startup rebuild from filesystem mtime
+- [ ] Cache status command (`mirage status`)
+
 ## Filesystem
 
 - [ ] FUSE mount (present cloud file tree at a specified directory)
@@ -25,23 +56,11 @@
 - [ ] Always local: keep specified folders/files synced at all times
 - [ ] Per-folder / per-file mode switching
 
-## Cache Management
-
-- [ ] LRU eviction (configurable capacity limit)
-- [ ] Pinned files excluded from eviction
-- [ ] Cache status command (`mirage status`)
-
 ## Offline Support
 
 - [ ] Read/write cached files while offline
 - [ ] Queue writes during offline, auto-upload on reconnect
 - [ ] Conflict detection and notification
-
-## Metadata Sync
-
-- [ ] Initial: full metadata fetch from server to local DB
-- [ ] Incremental: sync changes via ETag / notify_push
-- [ ] readdir() served from local DB (no network required)
 
 ## CLI
 
