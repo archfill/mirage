@@ -265,7 +265,7 @@ mod tests {
         let xml = make_multistatus(&format!(
             "{}\n{}\n{}",
             make_response(
-                &format!("{DAV_BASE}"),
+                DAV_BASE,
                 true,
                 "<d:getlastmodified>Thu, 01 Jan 2024 00:00:00 GMT</d:getlastmodified>"
             ),

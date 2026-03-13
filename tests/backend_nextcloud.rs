@@ -89,7 +89,7 @@ async fn list_dir_returns_entries() {
     ));
 
     Mock::given(method("PROPFIND"))
-        .and(path(&dav_base()))
+        .and(path(dav_base()))
         .and(header("Depth", "1"))
         .respond_with(ResponseTemplate::new(207).set_body_string(xml))
         .mount(&server)
@@ -220,7 +220,7 @@ async fn auth_failure_returns_error() {
     let server = MockServer::start().await;
 
     Mock::given(method("PROPFIND"))
-        .and(path(&dav_base()))
+        .and(path(dav_base()))
         .respond_with(ResponseTemplate::new(401))
         .mount(&server)
         .await;
