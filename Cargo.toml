@@ -13,9 +13,16 @@ tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+quick-xml = "0.37"
+bytes = "1"
+secrecy = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+percent-encoding = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"
 
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt", "macros"] }
