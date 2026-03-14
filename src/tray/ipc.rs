@@ -268,6 +268,39 @@ impl Drop for IpcServer {
     }
 }
 
+// ── IPC Client ────────────────────────────────────────────────────────────────
+
+/// Connect to the daemon's socket, send `req`, and return the parsed response.
+///
+/// All I/O errors are mapped to `String` so that tray code does not need to
+/// depend on the daemon's error type.
+pub fn send_request(req: &TrayRequest) -> std::result::Result<TrayResponse, String> {
+    let path = socket_path();
+    let stream = UnixStream::connect(&path)
+        .map_err(|e| format!("failed to connect to {}: {e}", path.display()))?;
+
+    let reader_stream = stream
+        .try_clone()
+        .map_err(|e| format!("failed to clone stream: {e}"))?;
+
+    let mut writer = BufWriter::new(&stream);
+    let mut reader = BufReader::new(reader_stream);
+
+    let json = serde_json::to_string(req).map_err(|e| format!("serialize error: {e}"))?;
+    writeln!(writer, "{json}").map_err(|e| format!("write error: {e}"))?;
+    writer.flush().map_err(|e| format!("flush error: {e}"))?;
+
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("read error: {e}"))?;
+
+    let response: TrayResponse =
+        serde_json::from_str(line.trim()).map_err(|e| format!("deserialize error: {e}"))?;
+
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,37 +494,4 @@ mod tests {
 
         handle.join().unwrap();
     }
-}
-
-// ── IPC Client ────────────────────────────────────────────────────────────────
-
-/// Connect to the daemon's socket, send `req`, and return the parsed response.
-///
-/// All I/O errors are mapped to `String` so that tray code does not need to
-/// depend on the daemon's error type.
-pub fn send_request(req: &TrayRequest) -> std::result::Result<TrayResponse, String> {
-    let path = socket_path();
-    let stream = UnixStream::connect(&path)
-        .map_err(|e| format!("failed to connect to {}: {e}", path.display()))?;
-
-    let reader_stream = stream
-        .try_clone()
-        .map_err(|e| format!("failed to clone stream: {e}"))?;
-
-    let mut writer = BufWriter::new(&stream);
-    let mut reader = BufReader::new(reader_stream);
-
-    let json = serde_json::to_string(req).map_err(|e| format!("serialize error: {e}"))?;
-    writeln!(writer, "{json}").map_err(|e| format!("write error: {e}"))?;
-    writer.flush().map_err(|e| format!("flush error: {e}"))?;
-
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|e| format!("read error: {e}"))?;
-
-    let response: TrayResponse =
-        serde_json::from_str(line.trim()).map_err(|e| format!("deserialize error: {e}"))?;
-
-    Ok(response)
 }
