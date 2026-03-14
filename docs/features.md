@@ -10,6 +10,7 @@
 - [x] Logging setup (tracing + tracing-subscriber)
 - [x] CI pipeline (GitHub Actions: fmt, clippy, build, test)
 - [x] Stub modules (fuse, db, cache, backend/nextcloud)
+- [x] `Config::load()` — `~/.config/mirage/config.toml` 読み込み
 
 ## Metadata DB
 
@@ -38,49 +39,75 @@
 
 - [x] LRU eviction (configurable capacity limit)
 - [x] Pinned files excluded from eviction
+- [x] PendingUpload files excluded from eviction
 - [x] Cache file storage ({cache_dir}/{inode})
 - [x] Startup rebuild from filesystem mtime
-- [ ] Cache status command (`mirage status`)
 
 ## Filesystem
 
-- [ ] FUSE mount (present cloud file tree at a specified directory)
-- [ ] Instant file metadata display (size, modified time, permissions)
-- [ ] On-demand download (fetch file content only when opened)
-- [ ] Local write → background upload
-- [ ] Directory create / delete / rename
+- [x] FUSE mount (present cloud file tree at a specified directory)
+- [x] Instant file metadata display (size, modified time, permissions)
+- [x] On-demand download (fetch file content only when opened)
+- [x] Local write → background upload (write/create/flush/fsync/release)
+- [x] Directory create / delete / rename (mkdir/rmdir/unlink/rename)
+- [x] setattr (truncate, mtime update)
+
+## Large File / Non-blocking / Graceful Shutdown
+
+- [x] Disk-based write buffer (avoids OOM for large files)
+- [x] Non-blocking download (Mutex released during file download)
+- [x] Graceful shutdown (drain pending uploads on Ctrl+C)
+- [x] Orphan temp file cleanup on startup
+
+## Conflict Detection & Retry
+
+- [x] SyncState::Conflict for local-pending-upload vs remote-changed
+- [x] Reconciler detects conflicts and sets Conflict state
+- [x] Exponential backoff for upload retries
+- [x] Transient vs permanent error classification
+- [x] `mirage conflicts` command
 
 ## Sync Modes
 
-- [ ] On-demand (default): download on access
-- [ ] Always local: keep specified folders/files synced at all times
-- [ ] Per-folder / per-file mode switching
+- [x] On-demand (default): download on access
+- [x] Always local: keep specified folders/files synced at all times
+- [x] Per-folder / per-file mode switching
 
 ## Offline Support
 
-- [ ] Read/write cached files while offline
-- [ ] Queue writes during offline, auto-upload on reconnect
-- [ ] Conflict detection and notification
+- [x] Read/write cached files while offline
+- [x] Queue writes during offline, auto-upload on reconnect
+- [x] Conflict detection and notification
+- [x] Network state monitoring (lock-free AtomicU8)
+- [x] Offline-aware FUSE open() returns EHOSTUNREACH for uncached files
+- [x] Conflict resolution (`mirage resolve <path> keep-local|keep-remote|keep-both`)
+- [x] Recursive pin/unpin (`--recursive` flag)
 
 ## CLI
 
-- [ ] `mirage mount <mountpoint>` - mount
-- [ ] `mirage unmount` - unmount
-- [ ] `mirage status` - show sync state and cache usage
-- [ ] `mirage pin <path>` - mark as always local
-- [ ] `mirage unpin <path>` - revert to on-demand
-- [ ] `mirage config` - configure server URL, auth, cache limit, etc.
+- [x] `mirage mount <mountpoint>` - mount (read-write, Phase 2A)
+- [x] `mirage unmount` - unmount
+- [x] `mirage status` - show sync state and cache usage
+- [x] `mirage pin <path> [--recursive]` - mark as always local
+- [x] `mirage unpin <path> [--recursive]` - revert to on-demand
+- [x] `mirage config init` - generate template config file
+- [x] `mirage config path` - show config file path
+- [x] `mirage conflicts` - list files in conflict state
+- [x] `mirage resolve <path> <keep-local|keep-remote|keep-both>` - resolve conflict
+- [x] `mirage daemon start|stop|status` - daemon management
+- [x] `mirage tray` - launch system tray application
 
 ## System Tray
 
-- [ ] Tray icon showing sync status
-- [ ] Right-click menu (status / pin / unpin / settings / unmount)
+- [x] Tray icon showing sync status (ksni/SNI)
+- [x] Right-click menu (status / quit)
 - [ ] Sync progress display
-- [ ] Error and conflict notifications
-- [ ] KDE (SNI) / GNOME (AppIndicator) / XFCE support
+- [x] Error and conflict notifications (notify-rust)
+- [x] KDE (SNI) / XFCE / Sway / i3 support (GNOME requires AppIndicator extension)
 
 ## Daemon
 
-- [ ] Run as systemd service
-- [ ] Auto-mount on login
-- [ ] Network state monitoring and auto-reconnect
+- [x] Run as systemd service
+- [x] Auto-mount on login (mount point auto-creation)
+- [x] Network state monitoring and auto-reconnect
+- [x] journald log integration for daemon mode
