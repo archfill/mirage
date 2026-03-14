@@ -7,6 +7,7 @@ pub enum SyncState {
     Synced,
     PendingDownload,
     PendingUpload,
+    Conflict,
 }
 
 impl fmt::Display for SyncState {
@@ -15,6 +16,7 @@ impl fmt::Display for SyncState {
             SyncState::Synced => write!(f, "synced"),
             SyncState::PendingDownload => write!(f, "pending_download"),
             SyncState::PendingUpload => write!(f, "pending_upload"),
+            SyncState::Conflict => write!(f, "conflict"),
         }
     }
 }
@@ -27,6 +29,7 @@ impl FromStr for SyncState {
             "synced" => Ok(SyncState::Synced),
             "pending_download" => Ok(SyncState::PendingDownload),
             "pending_upload" => Ok(SyncState::PendingUpload),
+            "conflict" => Ok(SyncState::Conflict),
             other => Err(format!("unknown sync state: {other}")),
         }
     }

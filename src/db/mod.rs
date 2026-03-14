@@ -53,6 +53,14 @@ impl Database {
         Ok(db)
     }
 
+    /// Open an existing database in read-only mode.
+    pub fn open_readonly(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA query_only=ON;")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        Ok(Self { conn })
+    }
+
     /// Open an in-memory database (for tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
@@ -203,11 +211,57 @@ impl Database {
         Ok(())
     }
 
+    /// Recursively set the pinned flag on an entry and all its descendants.
+    /// Returns the number of entries affected.
+    pub fn set_pinned_recursive(&self, inode: u64, pinned: bool) -> Result<u64> {
+        self.set_pinned(inode, pinned)?;
+        let mut count = 1u64;
+        let children = self.list_children(inode)?;
+        for child in children {
+            if child.is_dir {
+                count += self.set_pinned_recursive(child.inode, pinned)?;
+            } else {
+                self.set_pinned(child.inode, pinned)?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Set the cached flag on an entry.
     pub fn set_cached(&self, inode: u64, cached: bool) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE files SET is_cached = ?1 WHERE inode = ?2",
             params![cached as i64, Self::to_i64(inode)?],
+        )?;
+        if changed == 0 {
+            return Err(Error::InodeNotFound(inode));
+        }
+        Ok(())
+    }
+
+    /// Move/rename an entry (update parent_inode and name).
+    pub fn move_entry(&self, inode: u64, new_parent: u64, new_name: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE files SET parent_inode = ?1, name = ?2 WHERE inode = ?3",
+            params![Self::to_i64(new_parent)?, new_name, Self::to_i64(inode)?],
+        )?;
+        if changed == 0 {
+            return Err(Error::InodeNotFound(inode));
+        }
+        Ok(())
+    }
+
+    /// Update size, mtime, and sync_state for an entry (used after write flush).
+    pub fn update_file_after_write(&self, inode: u64, size: u64, mtime: i64) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE files SET size = ?1, mtime = ?2, sync_state = ?3 WHERE inode = ?4",
+            params![
+                size as i64,
+                mtime,
+                SyncState::PendingUpload.to_string(),
+                Self::to_i64(inode)?
+            ],
         )?;
         if changed == 0 {
             return Err(Error::InodeNotFound(inode));
@@ -225,6 +279,38 @@ impl Database {
             return Err(Error::InodeNotFound(inode));
         }
         Ok(())
+    }
+
+    // ── Aggregate queries ─────────────────────────────────────────
+
+    /// Count total number of file entries (excluding root).
+    pub fn count_total(&self) -> Result<u64> {
+        let n: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM files WHERE inode != 1", [], |r| {
+                    r.get(0)
+                })?;
+        Ok(n as u64)
+    }
+
+    /// Count entries that are cached locally.
+    pub fn count_cached(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE is_cached = 1 AND inode != 1",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Count entries in a specific sync state (excluding root).
+    pub fn count_by_sync_state(&self, state: SyncState) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE sync_state = ?1 AND inode != 1",
+            params![state.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
     }
 
     // ── Query operations ─────────────────────────────────────────
@@ -472,6 +558,77 @@ mod tests {
         db.insert(&sample_entry(1, "dup.txt", false)).unwrap();
         let err = db.insert(&sample_entry(1, "dup.txt", false)).unwrap_err();
         assert!(matches!(err, Error::Database(_)));
+    }
+
+    #[test]
+    fn count_total() {
+        let db = test_db();
+        assert_eq!(db.count_total().unwrap(), 0);
+        db.insert(&sample_entry(1, "a.txt", false)).unwrap();
+        db.insert(&sample_entry(1, "b.txt", false)).unwrap();
+        assert_eq!(db.count_total().unwrap(), 2);
+    }
+
+    #[test]
+    fn count_cached() {
+        let db = test_db();
+        let i1 = db.insert(&sample_entry(1, "a.txt", false)).unwrap();
+        db.insert(&sample_entry(1, "b.txt", false)).unwrap();
+        assert_eq!(db.count_cached().unwrap(), 0);
+        db.set_cached(i1, true).unwrap();
+        assert_eq!(db.count_cached().unwrap(), 1);
+    }
+
+    #[test]
+    fn count_by_sync_state() {
+        let db = test_db();
+        let i1 = db.insert(&sample_entry(1, "a.txt", false)).unwrap();
+        db.insert(&sample_entry(1, "b.txt", false)).unwrap();
+        // Both start as Synced; root is excluded
+        assert_eq!(db.count_by_sync_state(SyncState::Synced).unwrap(), 2);
+        db.update_sync_state(i1, SyncState::PendingDownload)
+            .unwrap();
+        assert_eq!(
+            db.count_by_sync_state(SyncState::PendingDownload).unwrap(),
+            1
+        );
+        assert_eq!(db.count_by_sync_state(SyncState::Synced).unwrap(), 1);
+    }
+
+    #[test]
+    fn set_pinned_recursive() {
+        let db = test_db();
+        // Build a 3-level tree: root -> dir_a -> dir_b -> file_deep
+        //                        root -> dir_a -> file_shallow
+        //                        root -> file_root
+        let dir_a = db.insert(&sample_entry(1, "dir_a", true)).unwrap();
+        let file_shallow = db
+            .insert(&sample_entry(dir_a, "file_shallow.txt", false))
+            .unwrap();
+        let dir_b = db.insert(&sample_entry(dir_a, "dir_b", true)).unwrap();
+        let file_deep = db
+            .insert(&sample_entry(dir_b, "file_deep.txt", false))
+            .unwrap();
+        let file_root = db.insert(&sample_entry(1, "file_root.txt", false)).unwrap();
+
+        // Recursive pin on dir_a should pin dir_a, file_shallow, dir_b, file_deep
+        let count = db.set_pinned_recursive(dir_a, true).unwrap();
+        assert_eq!(count, 4);
+
+        assert!(db.get_by_inode(dir_a).unwrap().is_pinned);
+        assert!(db.get_by_inode(file_shallow).unwrap().is_pinned);
+        assert!(db.get_by_inode(dir_b).unwrap().is_pinned);
+        assert!(db.get_by_inode(file_deep).unwrap().is_pinned);
+        // file_root should NOT be pinned
+        assert!(!db.get_by_inode(file_root).unwrap().is_pinned);
+
+        // Recursive unpin
+        let count = db.set_pinned_recursive(dir_a, false).unwrap();
+        assert_eq!(count, 4);
+        assert!(!db.get_by_inode(dir_a).unwrap().is_pinned);
+        assert!(!db.get_by_inode(file_shallow).unwrap().is_pinned);
+        assert!(!db.get_by_inode(dir_b).unwrap().is_pinned);
+        assert!(!db.get_by_inode(file_deep).unwrap().is_pinned);
     }
 
     #[test]

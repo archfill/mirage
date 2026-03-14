@@ -31,6 +31,10 @@ fn test_config(server_url: &str) -> Config {
         cache_dir: PathBuf::from("/tmp/mirage-test-cache"),
         cache_limit_bytes: 1_000_000,
         mount_point: PathBuf::from("/tmp/mirage-test-mount"),
+        sync_interval_secs: 300,
+        retry_base_secs: 30,
+        retry_max_secs: 600,
+        always_local_paths: vec![],
     }
 }
 

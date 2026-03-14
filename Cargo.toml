@@ -16,8 +16,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 quick-xml = "0.37"
 bytes = "1"
 secrecy = "0.10"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+ctrlc = "3"
 percent-encoding = "2"
+libc = "0.2"
+dirs = "6"
+tracing-journald = "0.3"
+ksni = "0.2"
+notify-rust = "4"
+serde_json = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"

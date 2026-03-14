@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use bytes::Bytes;
 
 use crate::db::Database;
+use crate::db::models::SyncState;
 use crate::error::Result;
 
 /// Internal LRU tracking state, protected by Mutex.
@@ -83,7 +84,16 @@ impl CacheManager {
         let mut read_dir = tokio::fs::read_dir(&cache_dir).await?;
         while let Some(dir_entry) = read_dir.next_entry().await? {
             let file_name = dir_entry.file_name();
-            let Some(inode) = file_name.to_str().and_then(|s| s.parse::<u64>().ok()) else {
+            let name_str = file_name.to_str().unwrap_or("");
+
+            // Clean up orphaned write buffer temp files from previous crashes.
+            if name_str.starts_with(".write_") {
+                tracing::info!(file = name_str, "removing orphaned write buffer");
+                let _ = tokio::fs::remove_file(dir_entry.path()).await;
+                continue;
+            }
+
+            let Some(inode) = name_str.parse::<u64>().ok() else {
                 continue;
             };
             let metadata = dir_entry.metadata().await?;
@@ -109,6 +119,16 @@ impl CacheManager {
             db,
             inner: Mutex::new(state),
         })
+    }
+
+    /// Access the underlying database.
+    pub fn db(&self) -> &Database {
+        &self.db
+    }
+
+    /// Return the cache directory path.
+    pub fn cache_dir(&self) -> &std::path::Path {
+        &self.cache_dir
     }
 
     /// Return the on-disk path for a cached inode.
@@ -175,6 +195,13 @@ impl CacheManager {
         Ok(())
     }
 
+    /// Track a file that was written to the cache externally (e.g. by WriteBuffer::finalize).
+    /// Updates the LRU state without writing data (the file is already on disk).
+    pub fn track_external_put(&self, inode: u64, size: u64) {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        state.insert(inode, size);
+    }
+
     /// Check whether a file is in the cache.
     pub fn contains(&self, inode: u64) -> bool {
         let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -203,7 +230,9 @@ impl CacheManager {
                 let mut found = None;
                 for &inode in &state.order {
                     match self.db.get_by_inode(inode) {
-                        Ok(entry) if !entry.is_pinned => {
+                        Ok(entry)
+                            if !entry.is_pinned && entry.sync_state != SyncState::PendingUpload =>
+                        {
                             found = Some(inode);
                             break;
                         }
