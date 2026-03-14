@@ -6,9 +6,10 @@
 pub mod reconciler;
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::backend::{Backend, RemoteEntry};
+use crate::backend::Backend;
 use crate::db::Database;
 use crate::db::models::SyncState;
 use crate::error::{Error, Result};
@@ -21,6 +22,7 @@ pub struct SyncReport {
     pub added: u64,
     pub updated: u64,
     pub deleted: u64,
+    pub pinned_downloads: u64,
     pub errors: Vec<SyncError>,
 }
 
@@ -29,6 +31,7 @@ impl SyncReport {
         self.added += other.added;
         self.updated += other.updated;
         self.deleted += other.deleted;
+        self.pinned_downloads += other.pinned_downloads;
         self.errors.extend(other.errors);
     }
 }
@@ -46,11 +49,23 @@ pub struct SyncError {
 pub struct SyncEngine<B: Backend> {
     db: Database,
     backend: Arc<B>,
+    cache_dir: PathBuf,
+    always_local_paths: Vec<String>,
 }
 
 impl<B: Backend> SyncEngine<B> {
-    pub fn new(db: Database, backend: Arc<B>) -> Self {
-        Self { db, backend }
+    pub fn new(
+        db: Database,
+        backend: Arc<B>,
+        cache_dir: PathBuf,
+        always_local_paths: Vec<String>,
+    ) -> Self {
+        Self {
+            db,
+            backend,
+            cache_dir,
+            always_local_paths,
+        }
     }
 
     /// Sync a single directory (non-recursive).
@@ -61,7 +76,50 @@ impl<B: Backend> SyncEngine<B> {
 
     /// Full recursive sync from the root directory.
     pub async fn full_sync(&self) -> Result<SyncReport> {
-        self.sync_dir_recursive(1, "").await
+        let mut report = self.sync_dir_recursive(1, "").await?;
+        match self.download_pinned().await {
+            Ok(n) => report.pinned_downloads = n,
+            Err(e) => tracing::error!(error = %e, "pinned download failed"),
+        }
+        Ok(report)
+    }
+
+    /// Download pinned files that are not yet cached.
+    async fn download_pinned(&self) -> Result<u64> {
+        let pinned = self.db.get_pinned_entries()?;
+        let mut count = 0u64;
+        for entry in pinned {
+            if entry.is_cached || entry.is_dir {
+                continue;
+            }
+            let remote_path = self.resolve_remote_path(entry.inode)?;
+            match self.backend.download(&remote_path).await {
+                Ok(data) => {
+                    let cache_file = self.cache_dir.join(entry.inode.to_string());
+                    if let Err(e) = std::fs::write(&cache_file, &data) {
+                        tracing::error!(inode = entry.inode, error = %e, "failed to cache pinned file");
+                        continue;
+                    }
+                    if let Err(e) = self.db.set_cached(entry.inode, true) {
+                        tracing::error!(inode = entry.inode, error = %e, "failed to set cached flag");
+                        continue;
+                    }
+                    if entry.sync_state == SyncState::PendingDownload {
+                        let _ = self.db.update_sync_state(entry.inode, SyncState::Synced);
+                    }
+                    tracing::info!(
+                        inode = entry.inode,
+                        path = remote_path,
+                        "pinned file downloaded"
+                    );
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::error!(inode = entry.inode, path = remote_path, error = %e, "failed to download pinned file");
+                }
+            }
+        }
+        Ok(count)
     }
 
     /// Resolve the remote path for an inode by walking the parent chain.
@@ -126,7 +184,7 @@ impl<B: Backend> SyncEngine<B> {
         let mut report = SyncReport::default();
 
         for action in actions {
-            match self.apply_action(&action, &remote_entries) {
+            match self.apply_action(&action, remote_path) {
                 Ok(()) => match &action {
                     SyncAction::Insert(_) => report.added += 1,
                     SyncAction::Update { .. } => report.updated += 1,
@@ -142,25 +200,37 @@ impl<B: Backend> SyncEngine<B> {
         Ok(report)
     }
 
+    fn is_always_local(&self, remote_path: &str) -> bool {
+        self.always_local_paths
+            .iter()
+            .any(|prefix| remote_path == prefix || remote_path.starts_with(&format!("{prefix}/")))
+    }
+
     /// Apply a single sync action to the database.
-    fn apply_action(&self, action: &SyncAction, remote_entries: &[RemoteEntry]) -> Result<()> {
+    fn apply_action(&self, action: &SyncAction, parent_remote_path: &str) -> Result<()> {
         match action {
             SyncAction::Insert(entry) => {
-                self.db.insert(entry)?;
+                let child_path = if parent_remote_path.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{}/{}", parent_remote_path, entry.name)
+                };
+                if self.is_always_local(&child_path) && !entry.is_pinned {
+                    let mut pinned_entry = entry.clone();
+                    pinned_entry.is_pinned = true;
+                    self.db.insert(&pinned_entry)?;
+                } else {
+                    self.db.insert(entry)?;
+                }
             }
             SyncAction::Update { inode, entry } => {
-                // Check for conflict: PendingUpload + remote changed
-                if entry.sync_state == SyncState::PendingUpload {
-                    // Find matching remote to check if it actually changed
-                    let has_remote_change = remote_entries.iter().any(|r| r.name() == entry.name);
-                    if has_remote_change {
-                        // Log conflict but still update metadata (keeping PendingUpload state)
-                        tracing::warn!(
-                            inode = inode,
-                            name = %entry.name,
-                            "conflict detected: local PendingUpload and remote changed"
-                        );
-                    }
+                // Check for conflict: reconciler already set Conflict state
+                if entry.sync_state == SyncState::Conflict {
+                    tracing::warn!(
+                        inode = inode,
+                        name = %entry.name,
+                        "conflict detected: local PendingUpload and remote changed"
+                    );
                 }
                 self.db.update_metadata(*inode, entry)?;
             }
@@ -241,7 +311,7 @@ mod tests {
         }
 
         async fn download(&self, _remote_path: &str) -> Result<Bytes> {
-            unimplemented!("not needed for sync tests")
+            Ok(Bytes::new())
         }
 
         async fn upload(&self, _remote_path: &str, _data: Bytes) -> Result<RemoteEntry> {
@@ -275,7 +345,7 @@ mod tests {
 
     fn test_engine(mock: Arc<MockBackend>) -> SyncEngine<MockBackend> {
         let db = Database::open_in_memory().expect("failed to open in-memory db");
-        SyncEngine::new(db, mock)
+        SyncEngine::new(db, mock, std::env::temp_dir(), vec![])
     }
 
     // ── Integration tests ─────────────────────────────────────────
@@ -497,5 +567,40 @@ mod tests {
 
         let docs_children = engine.db.list_children(docs.inode).unwrap();
         assert_eq!(docs_children.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn always_local_auto_pins_matching_entries() {
+        let mock = Arc::new(MockBackend::new());
+        mock.add_dir(
+            "",
+            vec![
+                make_remote("docs", true, "e1"),
+                make_remote("photos", true, "e2"),
+            ],
+        );
+        mock.add_dir("docs", vec![make_remote("readme.md", false, "e3")]);
+        mock.add_dir("photos", vec![make_remote("cat.jpg", false, "e4")]);
+
+        let db = Database::open_in_memory().expect("failed to open in-memory db");
+        let engine = SyncEngine::new(db, mock, std::env::temp_dir(), vec!["docs".to_owned()]);
+
+        engine.full_sync().await.unwrap();
+
+        // docs dir and its contents should be pinned
+        let root_children = engine.db.list_children(1).unwrap();
+        let docs = root_children.iter().find(|e| e.name == "docs").unwrap();
+        assert!(docs.is_pinned, "docs dir should be auto-pinned");
+
+        let docs_children = engine.db.list_children(docs.inode).unwrap();
+        let readme = docs_children
+            .iter()
+            .find(|e| e.name == "readme.md")
+            .unwrap();
+        assert!(readme.is_pinned, "docs/readme.md should be auto-pinned");
+
+        // photos should NOT be pinned
+        let photos = root_children.iter().find(|e| e.name == "photos").unwrap();
+        assert!(!photos.is_pinned, "photos should not be pinned");
     }
 }

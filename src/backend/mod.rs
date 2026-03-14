@@ -92,6 +92,11 @@ pub trait Backend: Send + Sync {
 
     /// Create a remote directory.
     fn create_dir(&self, remote_path: &str) -> impl Future<Output = Result<()>> + Send;
+
+    /// Check if the backend is reachable. Default: issue a lightweight list_dir("").
+    fn ping(&self) -> impl Future<Output = Result<()>> + Send {
+        async { self.list_dir("").await.map(|_| ()) }
+    }
 }
 
 #[cfg(test)]

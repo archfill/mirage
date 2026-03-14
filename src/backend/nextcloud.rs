@@ -232,6 +232,26 @@ impl Backend for NextcloudClient {
         let status = response.status();
         self.check_status(status, &url)
     }
+
+    async fn ping(&self) -> Result<()> {
+        let url = self.url("");
+        let method = Method::from_bytes(b"PROPFIND").expect("PROPFIND is a valid HTTP method");
+
+        let response = self
+            .client
+            .request(method, &url)
+            .basic_auth(&self.username, Some(&self.password))
+            .header("Depth", "0")
+            .header(CONTENT_TYPE, "application/xml")
+            .body(PROPFIND_BODY)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(Error::Http)?;
+
+        let status = response.status();
+        self.check_status(status, &url)
+    }
 }
 
 /// Compute the parent DAV path for a given remote path.

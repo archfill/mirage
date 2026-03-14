@@ -50,9 +50,9 @@ pub fn reconcile(
                     // Preserve local-only state
                     new_entry.is_pinned = local.is_pinned;
                     new_entry.is_cached = local.is_cached;
-                    // If local has pending upload and remote also changed, keep PendingUpload (conflict)
+                    // If local has pending upload and remote also changed, mark as Conflict
                     if local.sync_state == SyncState::PendingUpload {
-                        new_entry.sync_state = SyncState::PendingUpload;
+                        new_entry.sync_state = SyncState::Conflict;
                     } else if !remote.is_dir {
                         new_entry.sync_state = SyncState::PendingDownload;
                     }
@@ -67,7 +67,10 @@ pub fn reconcile(
 
     // Local-only entries → delete unless PendingUpload
     for (name, local) in &local_map {
-        if !remote_map.contains_key(name) && local.sync_state != SyncState::PendingUpload {
+        if !remote_map.contains_key(name)
+            && local.sync_state != SyncState::PendingUpload
+            && local.sync_state != SyncState::Conflict
+        {
             actions.push(SyncAction::Delete { inode: local.inode });
         }
     }
@@ -241,7 +244,7 @@ mod tests {
         }
     }
 
-    // 9. PendingUpload + remote changed → conflict (keep PendingUpload)
+    // 9. PendingUpload + remote changed → conflict (mark as Conflict)
     #[test]
     fn conflict_pending_upload_remote_changed() {
         let remotes = vec![make_remote("conflict.txt", false, Some("e2"))];
@@ -252,7 +255,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         match &actions[0] {
             SyncAction::Update { entry, .. } => {
-                assert_eq!(entry.sync_state, SyncState::PendingUpload);
+                assert_eq!(entry.sync_state, SyncState::Conflict);
             }
             _ => panic!("expected Update"),
         }
