@@ -16,6 +16,7 @@ pub enum TrayIconState {
 /// System tray icon for Mirage.
 pub struct MirageTray {
     pub status: Arc<Mutex<ipc::StatusInfo>>,
+    pub progress: Arc<Mutex<crate::sync::progress::ProgressInfo>>,
     pub icon_state: TrayIconState,
 }
 
@@ -44,21 +45,75 @@ impl ksni::Tray for MirageTray {
             )
         };
 
-        vec![
-            ksni::MenuItem::Standard(ksni::menu::StandardItem {
-                label: status_label,
+        let progress_label = {
+            let p = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            match p.phase {
+                crate::sync::progress::SyncPhase::Idle => None,
+                crate::sync::progress::SyncPhase::Scanning => Some("Scanning...".to_string()),
+                _ => {
+                    let file_info = if p.files_total > 0 {
+                        format!("{}/{} files", p.files_done, p.files_total)
+                    } else {
+                        String::new()
+                    };
+                    let byte_info = if p.bytes_total > 0 {
+                        format!(
+                            " ({} / {})",
+                            format_bytes_short(p.bytes_done),
+                            format_bytes_short(p.bytes_total)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let phase = match p.phase {
+                        crate::sync::progress::SyncPhase::Downloading => "Downloading",
+                        crate::sync::progress::SyncPhase::Uploading => "Uploading",
+                        _ => "Syncing",
+                    };
+                    Some(format!("{}: {}{}", phase, file_info, byte_info))
+                }
+            }
+        };
+
+        let mut items = vec![ksni::MenuItem::Standard(ksni::menu::StandardItem {
+            label: status_label,
+            enabled: false,
+            ..Default::default()
+        })];
+
+        if let Some(label) = progress_label {
+            items.push(ksni::MenuItem::Standard(ksni::menu::StandardItem {
+                label,
                 enabled: false,
                 ..Default::default()
+            }));
+        }
+
+        items.push(ksni::MenuItem::Separator);
+        items.push(ksni::MenuItem::Standard(ksni::menu::StandardItem {
+            label: "Quit".to_string(),
+            activate: Box::new(|_this: &mut MirageTray| {
+                std::process::exit(0);
             }),
-            ksni::MenuItem::Separator,
-            ksni::MenuItem::Standard(ksni::menu::StandardItem {
-                label: "Quit".to_string(),
-                activate: Box::new(|_this: &mut MirageTray| {
-                    std::process::exit(0);
-                }),
-                ..Default::default()
-            }),
-        ]
+            ..Default::default()
+        }));
+
+        items
+    }
+}
+
+fn format_bytes_short(bytes: u64) -> String {
+    const GB: u64 = 1_073_741_824;
+    const MB: u64 = 1_048_576;
+    const KB: u64 = 1_024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -72,20 +127,28 @@ fn try_get_status() -> Option<ipc::StatusInfo> {
     }
 }
 
+fn try_get_progress() -> Option<crate::sync::progress::ProgressInfo> {
+    match ipc::send_request(&ipc::TrayRequest::GetProgress) {
+        Ok(ipc::TrayResponse::Progress(info)) => Some(info),
+        _ => None,
+    }
+}
+
 /// Start the system tray icon.
 ///
 /// Checks that the mirage daemon is running, then creates and registers the tray
 /// icon. A background thread polls the daemon every 10 seconds to refresh status
 /// and raises a desktop notification when new conflicts are detected.
 pub fn run_tray() -> Result<()> {
-    // Verify the daemon is reachable before proceeding.
     let initial_status = try_get_status()
         .ok_or_else(|| Error::Config("mirage daemon is not running".to_string()))?;
 
     let status = Arc::new(Mutex::new(initial_status));
+    let progress = Arc::new(Mutex::new(crate::sync::progress::ProgressInfo::default()));
 
     let tray = MirageTray {
         status: Arc::clone(&status),
+        progress: Arc::clone(&progress),
         icon_state: TrayIconState::Idle,
     };
 
@@ -93,8 +156,8 @@ pub fn run_tray() -> Result<()> {
     let handle = service.handle();
     service.spawn();
 
-    // Background thread: poll IPC every 10 seconds and update shared status.
     let poll_status = Arc::clone(&status);
+    let poll_progress = Arc::clone(&progress);
     std::thread::spawn(move || {
         let mut prev_conflicts: u64 = {
             poll_status
@@ -124,10 +187,14 @@ pub fn run_tray() -> Result<()> {
 
                 prev_conflicts = new_conflicts;
             }
+
+            if let Some(new_progress) = try_get_progress() {
+                let mut guard = poll_progress.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = new_progress;
+            }
         }
     });
 
-    // Block on the tray service handle.
     handle.shutdown();
 
     Ok(())

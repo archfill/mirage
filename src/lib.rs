@@ -51,6 +51,25 @@ pub fn run(command: &Command) -> Result<()> {
         Command::Tray => {
             tray::run_tray()?;
         }
+        Command::Logs { follow, lines } => {
+            run_logs(*follow, *lines)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_logs(follow: bool, lines: u32) -> Result<()> {
+    let mut cmd = std::process::Command::new("journalctl");
+    cmd.arg("--user-unit=mirage.service")
+        .arg(format!("-n{lines}"));
+
+    if follow {
+        cmd.arg("-f");
+    }
+
+    let status = cmd.status().map_err(Error::Io)?;
+    if !status.success() {
+        return Err(Error::Config("journalctl command failed".into()));
     }
     Ok(())
 }
@@ -385,10 +404,19 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
     let sync_cache_dir = cfg.cache_dir.clone();
     let sync_net_state = net_monitor.shared();
     let sync_always_local = cfg.always_local_paths.clone();
+    let sync_progress = sync::progress::SyncProgress::new();
+    let ipc_progress = sync_progress.clone();
+    let ignore_path = cfg.ignore_file.clone().unwrap_or_else(|| {
+        dirs::config_dir()
+            .map(|d| d.join("mirage").join(".mirageignore"))
+            .unwrap_or_default()
+    });
     let sync_ping_backend = Arc::clone(&backend);
     std::thread::spawn(move || {
-        let sync_engine =
+        let mut sync_engine =
             sync::SyncEngine::new(sync_db, sync_backend, sync_cache_dir, sync_always_local);
+        sync_engine.set_progress(sync_progress);
+        sync_engine.set_ignore(sync::ignore::IgnoreRules::load(&ignore_path));
         let sync_rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -476,12 +504,12 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
     // Spawn IPC server thread for tray communication.
     let ipc_db = db::Database::open(&db_path)?;
     let ipc_net_state = net_monitor.shared();
-    std::thread::spawn(
-        move || match tray::ipc::IpcServer::new(ipc_db, ipc_net_state) {
+    std::thread::spawn(move || {
+        match tray::ipc::IpcServer::new(ipc_db, ipc_net_state, Some(ipc_progress)) {
             Ok(server) => server.run(),
             Err(e) => tracing::warn!(error = %e, "failed to start IPC server"),
-        },
-    );
+        }
+    });
 
     std::fs::create_dir_all(mountpoint)?;
     tracing::info!(path = %mountpoint.display(), "mounting FUSE filesystem");

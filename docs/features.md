@@ -101,7 +101,7 @@
 
 - [x] Tray icon showing sync status (ksni/SNI)
 - [x] Right-click menu (status / quit)
-- [ ] Sync progress display
+- [x] Sync progress display (IPC GetProgress + tray menu)
 - [x] Error and conflict notifications (notify-rust)
 - [x] KDE (SNI) / XFCE / Sway / i3 support (GNOME requires AppIndicator extension)
 

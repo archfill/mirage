@@ -32,6 +32,30 @@ pub struct Config {
     /// Paths to always keep locally (auto-pin on sync)
     #[serde(default)]
     pub always_local_paths: Vec<String>,
+    /// Connect timeout in seconds
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    /// Request timeout in seconds
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    /// Path to .mirageignore file
+    #[serde(default = "default_ignore_file")]
+    pub ignore_file: Option<PathBuf>,
+    /// Remote folder to sync (e.g. "MirageTest" to only sync that folder)
+    #[serde(default)]
+    pub remote_base_path: Option<String>,
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    10
+}
+
+fn default_request_timeout_secs() -> u64 {
+    60
+}
+
+fn default_ignore_file() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("mirage").join(".mirageignore"))
 }
 
 fn default_sync_interval_secs() -> u64 {
@@ -84,12 +108,24 @@ impl Config {
     /// Get the DAV base URL for this Nextcloud server.
     pub fn dav_base_url(&self) -> String {
         let base = self.server_url.trim_end_matches('/');
-        format!("{base}/remote.php/dav/files/{}/", self.username)
+        match &self.remote_base_path {
+            Some(rp) => {
+                let rp = rp.trim_matches('/');
+                format!("{base}/remote.php/dav/files/{}/{rp}/", self.username)
+            }
+            None => format!("{base}/remote.php/dav/files/{}/", self.username),
+        }
     }
 
     /// Get the DAV base path (for stripping from href in XML responses).
     pub fn dav_base_path(&self) -> String {
-        format!("/remote.php/dav/files/{}/", self.username)
+        match &self.remote_base_path {
+            Some(rp) => {
+                let rp = rp.trim_matches('/');
+                format!("/remote.php/dav/files/{}/{rp}/", self.username)
+            }
+            None => format!("/remote.php/dav/files/{}/", self.username),
+        }
     }
 
     /// Return the path to the config file.
@@ -132,6 +168,18 @@ retry_max_secs = 600
 
 # Paths to always keep locally (glob-free prefix match)
 # always_local_paths = ["Documents", "Photos/important"]
+
+# Connect timeout in seconds (default: 10)
+connect_timeout_secs = 10
+
+# Request timeout in seconds (default: 60)
+request_timeout_secs = 60
+
+# Path to ignore patterns file (default: ~/.config/mirage/.mirageignore)
+# ignore_file = "~/.config/mirage/.mirageignore"
+
+# Remote folder to sync (omit to sync entire account)
+# remote_base_path = "MirageTest"
 "#
         .to_owned()
     }
@@ -154,6 +202,10 @@ mod tests {
             retry_base_secs: 30,
             retry_max_secs: 600,
             always_local_paths: vec!["Documents".into()],
+            connect_timeout_secs: 10,
+            request_timeout_secs: 60,
+            ignore_file: None,
+            remote_base_path: None,
         };
         assert!(cfg.is_always_local("Documents"));
         assert!(cfg.is_always_local("Documents/report.pdf"));
@@ -174,6 +226,10 @@ mod tests {
             retry_base_secs: 30,
             retry_max_secs: 600,
             always_local_paths: vec![],
+            connect_timeout_secs: 10,
+            request_timeout_secs: 60,
+            ignore_file: None,
+            remote_base_path: None,
         };
         assert!(!cfg.is_always_local("anything"));
     }
@@ -203,5 +259,72 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.always_local_paths.len(), 2);
+    }
+
+    #[test]
+    fn dav_base_url_without_remote_base() {
+        let cfg = Config {
+            server_url: "https://cloud.example.com".into(),
+            username: "user".into(),
+            password: None,
+            cache_dir: PathBuf::new(),
+            cache_limit_bytes: 0,
+            mount_point: PathBuf::new(),
+            sync_interval_secs: 300,
+            retry_base_secs: 30,
+            retry_max_secs: 600,
+            always_local_paths: vec![],
+            connect_timeout_secs: 10,
+            request_timeout_secs: 60,
+            ignore_file: None,
+            remote_base_path: None,
+        };
+        assert_eq!(
+            cfg.dav_base_url(),
+            "https://cloud.example.com/remote.php/dav/files/user/"
+        );
+        assert_eq!(cfg.dav_base_path(), "/remote.php/dav/files/user/");
+    }
+
+    #[test]
+    fn dav_base_url_with_remote_base() {
+        let cfg = Config {
+            server_url: "https://cloud.example.com".into(),
+            username: "user".into(),
+            password: None,
+            cache_dir: PathBuf::new(),
+            cache_limit_bytes: 0,
+            mount_point: PathBuf::new(),
+            sync_interval_secs: 300,
+            retry_base_secs: 30,
+            retry_max_secs: 600,
+            always_local_paths: vec![],
+            connect_timeout_secs: 10,
+            request_timeout_secs: 60,
+            ignore_file: None,
+            remote_base_path: Some("MirageTest".into()),
+        };
+        assert_eq!(
+            cfg.dav_base_url(),
+            "https://cloud.example.com/remote.php/dav/files/user/MirageTest/"
+        );
+        assert_eq!(
+            cfg.dav_base_path(),
+            "/remote.php/dav/files/user/MirageTest/"
+        );
+    }
+
+    #[test]
+    fn deserialize_with_remote_base_path() {
+        let toml_str = r#"
+            server_url = "https://example.com"
+            username = "user"
+            cache_dir = "/tmp/cache"
+            cache_limit_bytes = 1024
+            mount_point = "/mnt"
+            remote_base_path = "Sync"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.remote_base_path.as_deref(), Some("Sync"));
     }
 }

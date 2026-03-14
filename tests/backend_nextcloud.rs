@@ -35,6 +35,10 @@ fn test_config(server_url: &str) -> Config {
         retry_base_secs: 30,
         retry_max_secs: 600,
         always_local_paths: vec![],
+        connect_timeout_secs: 10,
+        request_timeout_secs: 60,
+        ignore_file: None,
+        remote_base_path: None,
     }
 }
 

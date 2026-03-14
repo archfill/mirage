@@ -58,6 +58,15 @@ pub enum Command {
     },
     /// Launch the system tray application
     Tray,
+    /// Show mirage daemon logs
+    Logs {
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: u32,
+    },
 }
 
 #[derive(Debug, Subcommand)]
