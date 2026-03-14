@@ -1,0 +1,14 @@
+[Unit]
+Description=Mirage Cloud File Sync
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/mirage daemon start
+ExecStop=%h/.cargo/bin/mirage daemon stop
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

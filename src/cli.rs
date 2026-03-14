@@ -25,12 +25,69 @@ pub enum Command {
     Pin {
         /// Path to pin
         path: PathBuf,
+        /// Recursively pin all children
+        #[arg(short, long)]
+        recursive: bool,
     },
     /// Revert a file or directory to on-demand mode
     Unpin {
         /// Path to unpin
         path: PathBuf,
+        /// Recursively unpin all children
+        #[arg(short, long)]
+        recursive: bool,
     },
-    /// Configure server URL, auth, cache limit, etc.
-    Config,
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
+    /// List files in conflict state
+    Conflicts,
+    /// Resolve a conflicted file
+    Resolve {
+        /// Path to the conflicted file
+        path: PathBuf,
+        #[command(subcommand)]
+        strategy: ResolveStrategy,
+    },
+    /// Manage the mirage daemon
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+    /// Launch the system tray application
+    Tray,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ResolveStrategy {
+    /// Keep local version, overwriting remote
+    KeepLocal,
+    /// Keep remote version, overwriting local cache
+    KeepRemote,
+    /// Keep both: rename remote with conflict suffix, upload local
+    KeepBoth,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonAction {
+    /// Start mirage daemon (foreground, intended for systemd)
+    Start,
+    /// Stop the running mirage instance
+    Stop,
+    /// Check if mirage is running
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Generate a template config file
+    Init {
+        /// Overwrite existing config
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the config file path
+    Path,
 }
