@@ -9,7 +9,7 @@
 use bytes::Bytes;
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use reqwest::{Client, Method, StatusCode};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -36,21 +36,25 @@ pub struct NextcloudClient {
     dav_base_url: String,
     dav_base_path: String,
     username: String,
-    password: String,
+    password: SecretString,
 }
 
 impl NextcloudClient {
     /// Create a new Nextcloud client from application config.
     pub fn new(config: &Config) -> Result<Self> {
         let password = config.resolve_password()?;
-        let client = Client::new();
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
+            .timeout(std::time::Duration::from_secs(config.request_timeout_secs))
+            .build()
+            .map_err(|e| Error::Config(format!("failed to build HTTP client: {e}")))?;
 
         Ok(Self {
             client,
             dav_base_url: config.dav_base_url(),
             dav_base_path: config.dav_base_path(),
             username: config.username.clone(),
-            password: password.expose_secret().to_owned(),
+            password,
         })
     }
 
@@ -85,7 +89,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .request(method, &url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .header("Depth", "1")
             .header(CONTENT_TYPE, "application/xml")
             .body(PROPFIND_BODY)
@@ -118,7 +122,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .request(method, &url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .header("Depth", "0")
             .header(CONTENT_TYPE, "application/xml")
             .body(PROPFIND_BODY)
@@ -147,7 +151,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .get(&url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .send()
             .await
             .map_err(Error::Http)?;
@@ -164,7 +168,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .put(&url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .body(data)
             .send()
             .await
@@ -183,7 +187,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .delete(&url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .send()
             .await
             .map_err(Error::Http)?;
@@ -200,7 +204,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .request(method, &url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .header(
                 "Destination",
                 HeaderValue::from_str(&dest_url).map_err(|e| Error::WebDav {
@@ -224,7 +228,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .request(method, &url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .send()
             .await
             .map_err(Error::Http)?;
@@ -240,7 +244,7 @@ impl Backend for NextcloudClient {
         let response = self
             .client
             .request(method, &url)
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
             .header("Depth", "0")
             .header(CONTENT_TYPE, "application/xml")
             .body(PROPFIND_BODY)

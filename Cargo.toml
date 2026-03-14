@@ -25,6 +25,8 @@ tracing-journald = "0.3"
 ksni = "0.2"
 notify-rust = "4"
 serde_json = "1"
+globset = "0.4"
+lru = "0.12"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"

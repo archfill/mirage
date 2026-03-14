@@ -4,7 +4,6 @@
 // Implements LRU eviction to stay within the configured cache size,
 // while respecting pinned files that are excluded from eviction.
 
-use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -16,10 +15,8 @@ use crate::error::Result;
 
 /// Internal LRU tracking state, protected by Mutex.
 struct LruState {
-    /// front = LRU (evict first), back = MRU
-    order: VecDeque<u64>,
-    /// inode -> cached file size in bytes
-    sizes: HashMap<u64, u64>,
+    /// LRU cache mapping inode -> cached file size in bytes
+    cache: lru::LruCache<u64, u64>,
     /// Sum of all cached file sizes
     total_size: u64,
 }
@@ -27,42 +24,25 @@ struct LruState {
 impl LruState {
     fn new() -> Self {
         Self {
-            order: VecDeque::new(),
-            sizes: HashMap::new(),
+            // Unbounded: eviction is managed by CacheManager based on total_size
+            cache: lru::LruCache::unbounded(),
             total_size: 0,
         }
     }
 
-    /// Move an existing inode to the MRU (back) position.
-    fn promote(&mut self, inode: u64) {
-        if let Some(pos) = self.order.iter().position(|&i| i == inode) {
-            self.order.remove(pos);
-            self.order.push_back(inode);
-        }
-    }
-
-    /// Insert a new entry or update an existing one.
+    /// Insert a new entry or update an existing one (O(1)).
     fn insert(&mut self, inode: u64, size: u64) {
-        if let Some(&old_size) = self.sizes.get(&inode) {
-            // Update existing: adjust total_size and promote
+        if let Some(old_size) = self.cache.put(inode, size) {
             self.total_size = self.total_size - old_size + size;
-            self.sizes.insert(inode, size);
-            self.promote(inode);
         } else {
-            self.order.push_back(inode);
-            self.sizes.insert(inode, size);
             self.total_size += size;
         }
     }
 
-    /// Remove an entry from tracking.
+    /// Remove an entry from tracking (O(1)).
     fn remove(&mut self, inode: u64) {
-        if let Some(&size) = self.sizes.get(&inode) {
+        if let Some(size) = self.cache.pop(&inode) {
             self.total_size -= size;
-            self.sizes.remove(&inode);
-            if let Some(pos) = self.order.iter().position(|&i| i == inode) {
-                self.order.remove(pos);
-            }
         }
     }
 }
@@ -108,8 +88,7 @@ impl CacheManager {
 
         let mut state = LruState::new();
         for (inode, size, _) in entries {
-            state.order.push_back(inode);
-            state.sizes.insert(inode, size);
+            state.cache.put(inode, size);
             state.total_size += size;
         }
 
@@ -140,8 +119,7 @@ impl CacheManager {
     /// Returns `None` if the file is not cached.
     pub fn get(&self, inode: u64) -> Option<PathBuf> {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if state.sizes.contains_key(&inode) {
-            state.promote(inode);
+        if state.cache.get(&inode).is_some() {
             Some(self.file_path(inode))
         } else {
             None
@@ -205,7 +183,7 @@ impl CacheManager {
     /// Check whether a file is in the cache.
     pub fn contains(&self, inode: u64) -> bool {
         let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        state.sizes.contains_key(&inode)
+        state.cache.contains(&inode)
     }
 
     /// Current total size of all cached files in bytes.
@@ -228,7 +206,7 @@ impl CacheManager {
                 }
                 // Find the first non-pinned candidate from the LRU end
                 let mut found = None;
-                for &inode in &state.order {
+                for (&inode, _) in state.cache.iter().rev() {
                     match self.db.get_by_inode(inode) {
                         Ok(entry)
                             if !entry.is_pinned && entry.sync_state != SyncState::PendingUpload =>

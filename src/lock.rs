@@ -4,7 +4,7 @@
 // for status queries from other processes.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -26,7 +26,7 @@ impl LockFile {
 
         let file = OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)?;
@@ -46,8 +46,14 @@ impl LockFile {
             return Err(Error::Config(msg));
         }
 
+        // Truncate and seek to start after acquiring lock to avoid race with other readers
+        file.set_len(0)
+            .map_err(|e| Error::Config(format!("failed to truncate PID file: {e}")))?;
+        (&file)
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| Error::Config(format!("failed to seek PID file: {e}")))?;
+
         // Write PID
-        // Need a mutable reference, but we already have ownership
         let mut f = &file;
         write!(f, "{}", std::process::id())
             .map_err(|e| Error::Config(format!("failed to write PID file: {e}")))?;

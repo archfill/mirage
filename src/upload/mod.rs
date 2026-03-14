@@ -22,7 +22,11 @@ pub enum UploadMessage {
     /// Delete the remote entry at the given path.
     Delete(String),
     /// Move/rename a remote entry.
-    Move { from: String, to: String },
+    Move {
+        inode: u64,
+        from: String,
+        to: String,
+    },
     /// Create a remote directory.
     CreateDir(String),
     /// Shut down the worker loop.
@@ -43,7 +47,12 @@ pub struct UploadWorker<B: Backend> {
     pub retry_max_secs: u64,
     /// Track retry state per inode: (attempt_count, next_retry_time)
     retry_delays: std::collections::HashMap<u64, (u32, std::time::Instant)>,
+    /// Pending delete retries: (path, attempts, next_retry)
+    pending_deletes: Vec<(String, u32, std::time::Instant)>,
+    /// Pending move retries: (inode, from, to, attempts, next_retry)
+    pending_moves: Vec<(u64, String, String, u32, std::time::Instant)>,
     network_state: Arc<std::sync::atomic::AtomicU8>,
+    max_retries: u32,
 }
 
 impl<B: Backend + 'static> UploadWorker<B> {
@@ -67,7 +76,10 @@ impl<B: Backend + 'static> UploadWorker<B> {
             retry_base_secs,
             retry_max_secs,
             retry_delays: std::collections::HashMap::new(),
+            pending_deletes: Vec::new(),
+            pending_moves: Vec::new(),
             network_state,
+            max_retries: 5,
         }
     }
 
@@ -85,15 +97,26 @@ impl<B: Backend + 'static> UploadWorker<B> {
                     }
                 }
                 Ok(UploadMessage::Delete(path)) => {
-                    let result = self.rt.block_on(self.backend.delete(&path));
-                    if let Err(e) = result {
-                        tracing::error!(path, error = %e, "delete failed");
+                    if let Err(e) = self.rt.block_on(self.backend.delete(&path)) {
+                        tracing::error!(path = %path, error = %e, "delete failed, queuing for retry");
+                        let delay = Duration::from_secs(self.retry_base_secs);
+                        self.pending_deletes
+                            .push((path, 1, std::time::Instant::now() + delay));
                     }
                 }
-                Ok(UploadMessage::Move { from, to }) => {
-                    let result = self.rt.block_on(self.backend.move_entry(&from, &to));
-                    if let Err(e) = result {
-                        tracing::error!(from, to, error = %e, "move failed");
+                Ok(UploadMessage::Move { inode, from, to }) => {
+                    if let Err(e) = self.rt.block_on(self.backend.move_entry(&from, &to)) {
+                        tracing::error!(from, to, error = %e, "move failed, queuing for retry");
+                        let delay = Duration::from_secs(self.retry_base_secs);
+                        self.pending_moves.push((
+                            inode,
+                            from,
+                            to,
+                            1,
+                            std::time::Instant::now() + delay,
+                        ));
+                    } else if let Err(e) = self.db.update_sync_state(inode, SyncState::Synced) {
+                        tracing::error!(inode, error = %e, "failed to update sync state after move");
                     }
                 }
                 Ok(UploadMessage::CreateDir(path)) => {
@@ -118,10 +141,15 @@ impl<B: Backend + 'static> UploadWorker<B> {
                                     tracing::error!(path, error = %e, "shutdown drain: delete failed");
                                 }
                             }
-                            UploadMessage::Move { from, to } => {
-                                let result = self.rt.block_on(self.backend.move_entry(&from, &to));
-                                if let Err(e) = result {
+                            UploadMessage::Move { inode, from, to } => {
+                                if let Err(e) =
+                                    self.rt.block_on(self.backend.move_entry(&from, &to))
+                                {
                                     tracing::error!(from, to, error = %e, "shutdown drain: move failed");
+                                } else if let Err(e) =
+                                    self.db.update_sync_state(inode, SyncState::Synced)
+                                {
+                                    tracing::error!(inode, error = %e, "shutdown drain: failed to update sync state");
                                 }
                             }
                             UploadMessage::CreateDir(path) => {
@@ -150,7 +178,7 @@ impl<B: Backend + 'static> UploadWorker<B> {
         }
     }
 
-    /// Retry all entries currently marked `PendingUpload`, applying exponential backoff.
+    /// Retry all entries currently marked `PendingUpload`, plus pending deletes/moves.
     fn retry_pending(&mut self) {
         // Skip retry when offline
         if self
@@ -160,6 +188,10 @@ impl<B: Backend + 'static> UploadWorker<B> {
         {
             return;
         }
+
+        let now = std::time::Instant::now();
+
+        // Retry pending uploads
         let entries = match self.db.get_by_sync_state(SyncState::PendingUpload) {
             Ok(v) => v,
             Err(e) => {
@@ -167,9 +199,7 @@ impl<B: Backend + 'static> UploadWorker<B> {
                 return;
             }
         };
-        let now = std::time::Instant::now();
         for entry in entries {
-            // Check if backoff period has elapsed.
             if let Some((_, next_retry)) = self.retry_delays.get(&entry.inode)
                 && now < *next_retry
             {
@@ -203,6 +233,67 @@ impl<B: Backend + 'static> UploadWorker<B> {
                 }
             }
         }
+
+        // Retry pending deletes
+        let mut remaining_deletes = Vec::new();
+        for (path, attempts, next_retry) in std::mem::take(&mut self.pending_deletes) {
+            if now < next_retry {
+                remaining_deletes.push((path, attempts, next_retry));
+                continue;
+            }
+            match self.rt.block_on(self.backend.delete(&path)) {
+                Ok(()) => {
+                    tracing::info!(path, "delete retry succeeded");
+                }
+                Err(e) => {
+                    let new_attempts = attempts + 1;
+                    if new_attempts >= self.max_retries {
+                        tracing::error!(path, attempts = new_attempts, error = %e, "delete retry exhausted, giving up");
+                    } else {
+                        let delay_secs = std::cmp::min(
+                            self.retry_base_secs * 2u64.saturating_pow(new_attempts),
+                            self.retry_max_secs,
+                        );
+                        let next = now + Duration::from_secs(delay_secs);
+                        tracing::warn!(path, attempt = new_attempts, error = %e, "delete retry failed, backing off");
+                        remaining_deletes.push((path, new_attempts, next));
+                    }
+                }
+            }
+        }
+        self.pending_deletes = remaining_deletes;
+
+        // Retry pending moves
+        let mut remaining_moves = Vec::new();
+        for (inode, from, to, attempts, next_retry) in std::mem::take(&mut self.pending_moves) {
+            if now < next_retry {
+                remaining_moves.push((inode, from, to, attempts, next_retry));
+                continue;
+            }
+            match self.rt.block_on(self.backend.move_entry(&from, &to)) {
+                Ok(()) => {
+                    tracing::info!(from, to, "move retry succeeded");
+                    if let Err(e) = self.db.update_sync_state(inode, SyncState::Synced) {
+                        tracing::error!(inode, error = %e, "failed to update sync state after move retry");
+                    }
+                }
+                Err(e) => {
+                    let new_attempts = attempts + 1;
+                    if new_attempts >= self.max_retries {
+                        tracing::error!(from, to, attempts = new_attempts, error = %e, "move retry exhausted, giving up");
+                    } else {
+                        let delay_secs = std::cmp::min(
+                            self.retry_base_secs * 2u64.saturating_pow(new_attempts),
+                            self.retry_max_secs,
+                        );
+                        let next = now + Duration::from_secs(delay_secs);
+                        tracing::warn!(from, to, attempt = new_attempts, error = %e, "move retry failed, backing off");
+                        remaining_moves.push((inode, from, to, new_attempts, next));
+                    }
+                }
+            }
+        }
+        self.pending_moves = remaining_moves;
     }
 
     /// Upload the locally cached file for `inode` to the remote backend,

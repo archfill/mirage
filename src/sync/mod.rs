@@ -3,6 +3,8 @@
 // Fetches remote metadata via Backend, compares with local DB state
 // using the reconciler, and applies the resulting actions to the DB.
 
+pub mod ignore;
+pub mod progress;
 pub mod reconciler;
 
 use std::future::Future;
@@ -14,6 +16,7 @@ use crate::db::Database;
 use crate::db::models::SyncState;
 use crate::error::{Error, Result};
 
+use progress::SyncProgress;
 use reconciler::{SyncAction, reconcile};
 
 /// Summary of a sync operation.
@@ -51,6 +54,8 @@ pub struct SyncEngine<B: Backend> {
     backend: Arc<B>,
     cache_dir: PathBuf,
     always_local_paths: Vec<String>,
+    progress: Option<SyncProgress>,
+    ignore: ignore::IgnoreRules,
 }
 
 impl<B: Backend> SyncEngine<B> {
@@ -65,7 +70,17 @@ impl<B: Backend> SyncEngine<B> {
             backend,
             cache_dir,
             always_local_paths,
+            progress: None,
+            ignore: ignore::IgnoreRules::load(std::path::Path::new("")), // no-op default
         }
+    }
+
+    pub fn set_progress(&mut self, progress: SyncProgress) {
+        self.progress = Some(progress);
+    }
+
+    pub fn set_ignore(&mut self, rules: ignore::IgnoreRules) {
+        self.ignore = rules;
     }
 
     /// Sync a single directory (non-recursive).
@@ -76,10 +91,19 @@ impl<B: Backend> SyncEngine<B> {
 
     /// Full recursive sync from the root directory.
     pub async fn full_sync(&self) -> Result<SyncReport> {
+        if let Some(ref p) = self.progress {
+            p.set_scanning();
+        }
         let mut report = self.sync_dir_recursive(1, "").await?;
+        if let Some(ref p) = self.progress {
+            p.set_downloading("", 0, 0);
+        }
         match self.download_pinned().await {
             Ok(n) => report.pinned_downloads = n,
             Err(e) => tracing::error!(error = %e, "pinned download failed"),
+        }
+        if let Some(ref p) = self.progress {
+            p.set_idle();
         }
         Ok(report)
     }
@@ -178,6 +202,24 @@ impl<B: Backend> SyncEngine<B> {
     /// Core sync logic for a single directory.
     async fn sync_dir_impl(&self, inode: u64, remote_path: &str) -> Result<SyncReport> {
         let remote_entries = self.backend.list_dir(remote_path).await?;
+
+        // Filter out ignored entries
+        let remote_entries: Vec<_> = if self.ignore.is_empty() {
+            remote_entries
+        } else {
+            remote_entries
+                .into_iter()
+                .filter(|entry| {
+                    let full_path = if remote_path.is_empty() {
+                        entry.path.clone()
+                    } else {
+                        format!("{}/{}", remote_path, entry.path)
+                    };
+                    !self.ignore.is_ignored(&full_path)
+                })
+                .collect()
+        };
+
         let local_entries = self.db.list_children(inode)?;
 
         let actions = reconcile(inode, &remote_entries, &local_entries);
@@ -235,6 +277,13 @@ impl<B: Backend> SyncEngine<B> {
                 self.db.update_metadata(*inode, entry)?;
             }
             SyncAction::Delete { inode } => {
+                // Remove cached file before deleting DB entry
+                let cache_file = self.cache_dir.join(inode.to_string());
+                if cache_file.exists()
+                    && let Err(e) = std::fs::remove_file(&cache_file)
+                {
+                    tracing::warn!(inode, error = %e, "failed to remove cache file");
+                }
                 self.db.delete(*inode)?;
             }
         }

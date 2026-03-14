@@ -8,6 +8,33 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+/// Check if there is enough disk space for a write operation.
+/// Returns Ok(()) if sufficient space exists, Err otherwise.
+fn check_disk_space(path: &Path, required_bytes: u64) -> io::Result<()> {
+    let c_path = std::ffi::CString::new(
+        path.to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let available = stat.f_bavail * stat.f_bsize;
+    let margin = 1_048_576; // 1 MB margin
+    if available < required_bytes + margin {
+        return Err(io::Error::other(format!(
+            "insufficient disk space: {} available, {} required",
+            available,
+            required_bytes + margin
+        )));
+    }
+    Ok(())
+}
+
 /// A disk-backed write buffer for a single file handle.
 ///
 /// Data is written to a temporary file `{cache_dir}/.write_{inode}_{fh}`.
@@ -53,8 +80,14 @@ impl WriteBuffer {
 
     /// Write data at the given offset.
     pub fn write_at(&mut self, offset: u64, data: &[u8]) -> io::Result<u32> {
-        // Extend file if offset is beyond current length
+        // Check disk space before writing
         let end = offset + data.len() as u64;
+        if end > self.len {
+            let additional = end - self.len;
+            check_disk_space(&self.path, additional)?;
+        }
+
+        // Extend file if offset is beyond current length
         if end > self.len {
             self.file.set_len(end)?;
             self.len = end;
@@ -98,6 +131,20 @@ impl WriteBuffer {
         std::fs::rename(&self.path, target)?;
         self.finalized = true;
         Ok(())
+    }
+
+    /// Create a write buffer from an existing file (avoids reading into memory).
+    pub fn from_existing(cache_dir: &Path, inode: u64, fh: u64, source: &Path) -> io::Result<Self> {
+        let path = cache_dir.join(format!(".write_{inode}_{fh}"));
+        std::fs::copy(source, &path)?;
+        let len = std::fs::metadata(&path)?.len();
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        Ok(Self {
+            file,
+            path,
+            len,
+            finalized: false,
+        })
     }
 }
 
@@ -197,6 +244,13 @@ mod tests {
             assert!(temp_path.exists());
         }
         assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn check_disk_space_succeeds_with_available_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Should succeed - we're asking for a trivial amount
+        assert!(check_disk_space(tmp.path(), 1024).is_ok());
     }
 
     #[test]

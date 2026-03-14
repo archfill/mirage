@@ -120,6 +120,65 @@ impl<B: Backend + 'static> MirageFs<B> {
         Ok(parts.join("/"))
     }
 
+    /// Get file attributes for an inode (internal, testable).
+    #[cfg(test)]
+    fn do_getattr(&self, ino: u64) -> std::result::Result<FileAttr, Errno> {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        match cache.db().get_by_inode(ino) {
+            Ok(entry) => Ok(self.to_file_attr(&entry)),
+            Err(Error::InodeNotFound(_)) => Err(Errno::ENOENT),
+            Err(e) => {
+                tracing::error!(inode = ino, error = %e, "do_getattr failed");
+                Err(Errno::EIO)
+            }
+        }
+    }
+
+    /// Lookup a child entry by name (internal, testable).
+    #[cfg(test)]
+    fn do_lookup(&self, parent: u64, name: &str) -> std::result::Result<FileAttr, Errno> {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        match cache.db().lookup(parent, name) {
+            Ok(entry) => Ok(self.to_file_attr(&entry)),
+            Err(Error::EntryNotFound(_, _)) => Err(Errno::ENOENT),
+            Err(e) => {
+                tracing::error!(parent, name, error = %e, "do_lookup failed");
+                Err(Errno::EIO)
+            }
+        }
+    }
+
+    /// List directory entries (internal, testable).
+    #[cfg(test)]
+    fn do_readdir(&self, ino: u64) -> std::result::Result<Vec<(u64, bool, String)>, Errno> {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let parent_inode = match cache.db().get_by_inode(ino) {
+            Ok(entry) => entry.parent_inode,
+            Err(Error::InodeNotFound(_)) => return Err(Errno::ENOENT),
+            Err(e) => {
+                tracing::error!(inode = ino, error = %e, "do_readdir: getattr failed");
+                return Err(Errno::EIO);
+            }
+        };
+
+        let children = match cache.db().list_children(ino) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(inode = ino, error = %e, "do_readdir: list_children failed");
+                return Err(Errno::EIO);
+            }
+        };
+
+        let mut entries = vec![
+            (ino, true, ".".to_string()),
+            (parent_inode, true, "..".to_string()),
+        ];
+        for child in children {
+            entries.push((child.inode, child.is_dir, child.name));
+        }
+        Ok(entries)
+    }
+
     /// Flush write buffer for (inode, fh) to cache and update DB.
     fn flush_buffer(&self, ino: u64, fh: u64) -> std::result::Result<(), Errno> {
         let mut bufs = self.write_bufs.lock().unwrap_or_else(|e| e.into_inner());
@@ -151,16 +210,13 @@ impl<B: Backend + 'static> MirageFs<B> {
                     Errno::EIO
                 })?;
 
-            // Re-create WriteBuffer from the flushed data for continued writing.
-            let data = std::fs::read(&target).map_err(|e| {
-                tracing::error!(inode = ino, error = %e, "flush: re-read cache failed");
-                Errno::EIO
-            })?;
+            // Re-create WriteBuffer from the flushed file (no memory copy).
             let cache_dir = cache.cache_dir().to_path_buf();
-            let new_buf = WriteBuffer::new(&cache_dir, ino, fh, Some(&data)).map_err(|e| {
-                tracing::error!(inode = ino, error = %e, "flush: re-create WriteBuffer failed");
-                Errno::EIO
-            })?;
+            let new_buf =
+                WriteBuffer::from_existing(&cache_dir, ino, fh, &target).map_err(|e| {
+                    tracing::error!(inode = ino, error = %e, "flush: re-create WriteBuffer failed");
+                    Errno::EIO
+                })?;
             bufs.insert((ino, fh), new_buf);
         }
 
@@ -471,7 +527,9 @@ impl<B: Backend + 'static> Filesystem for MirageFs<B> {
             // flush_buffer re-inserts the buffer for continued writes; on release, remove it.
             let mut bufs = self.write_bufs.lock().unwrap_or_else(|e| e.into_inner());
             bufs.remove(&(ino_u64, fh_u64));
-            let _ = self.upload_tx.send(UploadMessage::Upload(ino_u64));
+            if let Err(e) = self.upload_tx.send(UploadMessage::Upload(ino_u64)) {
+                tracing::error!(inode = ino_u64, error = %e, "upload channel disconnected");
+            }
         }
 
         reply.ok();
@@ -745,7 +803,9 @@ impl<B: Backend + 'static> Filesystem for MirageFs<B> {
         // Build remote path and send CreateDir to worker
         match self.build_remote_path(inode, &cache) {
             Ok(remote_path) => {
-                let _ = self.upload_tx.send(UploadMessage::CreateDir(remote_path));
+                if let Err(e) = self.upload_tx.send(UploadMessage::CreateDir(remote_path)) {
+                    tracing::error!(error = %e, "upload channel disconnected");
+                }
             }
             Err(e) => {
                 tracing::error!(inode, error = %e, "mkdir: build_remote_path failed");
@@ -817,7 +877,9 @@ impl<B: Backend + 'static> Filesystem for MirageFs<B> {
         }
 
         // Send delete to upload worker
-        let _ = self.upload_tx.send(UploadMessage::Delete(remote_path));
+        if let Err(e) = self.upload_tx.send(UploadMessage::Delete(remote_path)) {
+            tracing::error!(error = %e, "upload channel disconnected");
+        }
 
         reply.ok();
     }
@@ -875,7 +937,9 @@ impl<B: Backend + 'static> Filesystem for MirageFs<B> {
             return;
         }
 
-        let _ = self.upload_tx.send(UploadMessage::Delete(remote_path));
+        if let Err(e) = self.upload_tx.send(UploadMessage::Delete(remote_path)) {
+            tracing::error!(error = %e, "upload channel disconnected");
+        }
 
         reply.ok();
     }
@@ -940,6 +1004,14 @@ impl<B: Backend + 'static> Filesystem for MirageFs<B> {
             return;
         }
 
+        // Mark as PendingUpload until remote move succeeds
+        if let Err(e) = cache
+            .db()
+            .update_sync_state(entry.inode, SyncState::PendingUpload)
+        {
+            tracing::error!(inode = entry.inode, error = %e, "rename: update_sync_state failed");
+        }
+
         // Build new remote path after the DB update
         let new_path = match self.build_remote_path(entry.inode, &cache) {
             Ok(p) => p,
@@ -950,11 +1022,188 @@ impl<B: Backend + 'static> Filesystem for MirageFs<B> {
             }
         };
 
-        let _ = self.upload_tx.send(UploadMessage::Move {
+        if let Err(e) = self.upload_tx.send(UploadMessage::Move {
+            inode: entry.inode,
             from: old_path,
             to: new_path,
-        });
+        }) {
+            tracing::error!(error = %e, "upload channel disconnected");
+        }
 
         reply.ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::backend::RemoteEntry;
+    use crate::cache::CacheManager;
+    use crate::db::models::{NewFileEntry, SyncState};
+    use bytes::Bytes;
+
+    struct DummyBackend;
+
+    impl Backend for DummyBackend {
+        async fn list_dir(&self, _: &str) -> crate::error::Result<Vec<RemoteEntry>> {
+            Ok(vec![])
+        }
+        async fn get_metadata(&self, _: &str) -> crate::error::Result<RemoteEntry> {
+            unimplemented!()
+        }
+        async fn download(&self, _: &str) -> crate::error::Result<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn upload(&self, _: &str, _: Bytes) -> crate::error::Result<RemoteEntry> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: &str) -> crate::error::Result<()> {
+            unimplemented!()
+        }
+        async fn move_entry(&self, _: &str, _: &str) -> crate::error::Result<()> {
+            unimplemented!()
+        }
+        async fn create_dir(&self, _: &str) -> crate::error::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    fn test_fs(tmp: &std::path::Path) -> MirageFs<DummyBackend> {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cache = rt
+            .block_on(CacheManager::open(tmp.to_path_buf(), 1_000_000, db))
+            .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        MirageFs::new(
+            cache,
+            Arc::new(DummyBackend),
+            rt.handle().clone(),
+            1000,
+            1000,
+            tx,
+            Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        )
+    }
+
+    #[test]
+    fn getattr_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = test_fs(tmp.path());
+        let attr = fs.do_getattr(1).unwrap();
+        assert_eq!(attr.ino, INodeNo(1));
+        assert_eq!(attr.kind, FileType::Directory);
+    }
+
+    #[test]
+    fn getattr_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = test_fs(tmp.path());
+        assert!(fs.do_getattr(99999).is_err());
+    }
+
+    #[test]
+    fn lookup_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = test_fs(tmp.path());
+        assert!(fs.do_lookup(1, "nonexistent").is_err());
+    }
+
+    #[test]
+    fn readdir_root_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = test_fs(tmp.path());
+        let entries = fs.do_readdir(1).unwrap();
+        // Should have . and .. only
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].2, ".");
+        assert_eq!(entries[1].2, "..");
+    }
+
+    #[test]
+    fn readdir_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = test_fs(tmp.path());
+        assert!(fs.do_readdir(99999).is_err());
+    }
+
+    #[test]
+    fn lookup_after_insert() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = test_fs(tmp.path());
+
+        // Insert a file entry
+        {
+            let cache = fs.cache.lock().unwrap();
+            cache
+                .db()
+                .insert(&NewFileEntry {
+                    parent_inode: 1,
+                    name: "test.txt".to_owned(),
+                    is_dir: false,
+                    size: 42,
+                    permissions: 0o644,
+                    mtime: 1000,
+                    etag: None,
+                    content_hash: None,
+                    is_pinned: false,
+                    is_cached: false,
+                    sync_state: SyncState::Synced,
+                })
+                .unwrap();
+        }
+
+        let attr = fs.do_lookup(1, "test.txt").unwrap();
+        assert_eq!(attr.kind, FileType::RegularFile);
+        assert_eq!(attr.size, 42);
+    }
+
+    #[test]
+    fn readdir_with_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = test_fs(tmp.path());
+
+        {
+            let cache = fs.cache.lock().unwrap();
+            cache
+                .db()
+                .insert(&NewFileEntry {
+                    parent_inode: 1,
+                    name: "file1.txt".to_owned(),
+                    is_dir: false,
+                    size: 100,
+                    permissions: 0o644,
+                    mtime: 1000,
+                    etag: None,
+                    content_hash: None,
+                    is_pinned: false,
+                    is_cached: false,
+                    sync_state: SyncState::Synced,
+                })
+                .unwrap();
+            cache
+                .db()
+                .insert(&NewFileEntry {
+                    parent_inode: 1,
+                    name: "subdir".to_owned(),
+                    is_dir: true,
+                    size: 0,
+                    permissions: 0o755,
+                    mtime: 1000,
+                    etag: None,
+                    content_hash: None,
+                    is_pinned: false,
+                    is_cached: false,
+                    sync_state: SyncState::Synced,
+                })
+                .unwrap();
+        }
+
+        let entries = fs.do_readdir(1).unwrap();
+        assert_eq!(entries.len(), 4); // . + .. + file1.txt + subdir
+        let names: Vec<&str> = entries.iter().map(|e| e.2.as_str()).collect();
+        assert!(names.contains(&"file1.txt"));
+        assert!(names.contains(&"subdir"));
     }
 }

@@ -22,6 +22,7 @@ use crate::error::{Error, Result};
 #[derive(Debug, Serialize, Deserialize)]
 pub enum TrayRequest {
     GetStatus,
+    GetProgress,
     Quit,
 }
 
@@ -29,6 +30,7 @@ pub enum TrayRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum TrayResponse {
     Status(StatusInfo),
+    Progress(crate::sync::progress::ProgressInfo),
     Ok,
     Error(String),
 }
@@ -64,6 +66,7 @@ pub struct IpcServer {
     db: crate::db::Database,
     net_state: Arc<AtomicU8>,
     path: PathBuf,
+    progress: Option<crate::sync::progress::SyncProgress>,
 }
 
 impl IpcServer {
@@ -74,7 +77,11 @@ impl IpcServer {
     ///
     /// `net_state` is an atomic byte shared with the network monitor.  A value
     /// of `0` means the daemon considers itself online.
-    pub fn new(db: crate::db::Database, net_state: Arc<AtomicU8>) -> Result<Self> {
+    pub fn new(
+        db: crate::db::Database,
+        net_state: Arc<AtomicU8>,
+        progress: Option<crate::sync::progress::SyncProgress>,
+    ) -> Result<Self> {
         let path = socket_path();
 
         // Remove a stale socket so `bind` does not fail.
@@ -83,6 +90,14 @@ impl IpcServer {
         }
 
         let listener = UnixListener::bind(&path).map_err(Error::Io)?;
+
+        // Restrict socket permissions to owner only
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&path, perms).map_err(Error::Io)?;
+        }
+
         tracing::info!(socket = %path.display(), "IPC server listening");
 
         Ok(Self {
@@ -90,6 +105,7 @@ impl IpcServer {
             db,
             net_state,
             path,
+            progress,
         })
     }
 
@@ -99,12 +115,18 @@ impl IpcServer {
     /// response is written, then the connection is closed.  `Quit` breaks the
     /// accept loop and returns.
     pub fn run(&self) {
+        let mut consecutive_errors: u32 = 0;
         for stream in self.listener.incoming() {
             match stream {
                 Err(e) => {
                     tracing::warn!(error = %e, "IPC accept error");
+                    consecutive_errors += 1;
+                    let backoff_ms =
+                        std::cmp::min(10u64 * 2u64.saturating_pow(consecutive_errors), 5000);
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                 }
                 Ok(stream) => {
+                    consecutive_errors = 0;
                     let quit = self.handle_connection(stream);
                     if quit {
                         tracing::info!("IPC server received Quit — shutting down");
@@ -148,6 +170,14 @@ impl IpcServer {
         match request {
             TrayRequest::GetStatus => {
                 let response = self.build_status_response();
+                let _ = self.write_response(&mut writer, &response);
+                false
+            }
+            TrayRequest::GetProgress => {
+                let response = match &self.progress {
+                    Some(p) => TrayResponse::Progress(p.snapshot()),
+                    None => TrayResponse::Progress(crate::sync::progress::ProgressInfo::default()),
+                };
                 let _ = self.write_response(&mut writer, &response);
                 false
             }
@@ -235,6 +265,201 @@ impl Drop for IpcServer {
                 "IPC: failed to remove socket on drop"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_request_serialization() {
+        let req = TrayRequest::GetStatus;
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: TrayRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, TrayRequest::GetStatus));
+    }
+
+    #[test]
+    fn progress_request_serialization() {
+        let req = TrayRequest::GetProgress;
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: TrayRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, TrayRequest::GetProgress));
+    }
+
+    #[test]
+    fn quit_request_serialization() {
+        let req = TrayRequest::Quit;
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: TrayRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, TrayRequest::Quit));
+    }
+
+    #[test]
+    fn status_response_serialization() {
+        let resp = TrayResponse::Status(StatusInfo {
+            online: true,
+            synced: 10,
+            pending: 2,
+            conflicts: 1,
+        });
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: TrayResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TrayResponse::Status(info) => {
+                assert!(info.online);
+                assert_eq!(info.synced, 10);
+                assert_eq!(info.pending, 2);
+                assert_eq!(info.conflicts, 1);
+            }
+            _ => panic!("expected Status response"),
+        }
+    }
+
+    #[test]
+    fn progress_response_serialization() {
+        let info = crate::sync::progress::ProgressInfo {
+            phase: crate::sync::progress::SyncPhase::Downloading,
+            current_file: Some("test.txt".to_owned()),
+            files_done: 5,
+            files_total: 10,
+            bytes_done: 1024,
+            bytes_total: 2048,
+        };
+        let resp = TrayResponse::Progress(info);
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: TrayResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TrayResponse::Progress(p) => {
+                assert_eq!(p.phase, crate::sync::progress::SyncPhase::Downloading);
+                assert_eq!(p.current_file.as_deref(), Some("test.txt"));
+                assert_eq!(p.files_done, 5);
+                assert_eq!(p.bytes_total, 2048);
+            }
+            _ => panic!("expected Progress response"),
+        }
+    }
+
+    #[test]
+    fn error_response_serialization() {
+        let resp = TrayResponse::Error("something went wrong".to_owned());
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: TrayResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TrayResponse::Error(msg) => assert_eq!(msg, "something went wrong"),
+            _ => panic!("expected Error response"),
+        }
+    }
+
+    #[test]
+    fn malformed_request_parsing() {
+        let result: std::result::Result<TrayRequest, _> = serde_json::from_str("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ipc_server_handles_status_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock_path = tmp.path().join("test.sock");
+
+        let net_state = Arc::new(AtomicU8::new(0));
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let net_clone = Arc::clone(&net_state);
+
+        let handle = std::thread::spawn(move || {
+            let _net = net_clone;
+            let (stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            let mut writer = BufWriter::new(&stream);
+
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let _req: TrayRequest = serde_json::from_str(line.trim()).unwrap();
+
+            let response = TrayResponse::Status(StatusInfo {
+                online: true,
+                synced: 0,
+                pending: 0,
+                conflicts: 0,
+            });
+            let json = serde_json::to_string(&response).unwrap();
+            writeln!(writer, "{json}").unwrap();
+            writer.flush().unwrap();
+        });
+
+        // Client side
+        let stream = UnixStream::connect(&sock_path).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut writer = BufWriter::new(&stream);
+        let mut reader = BufReader::new(reader_stream);
+
+        let req = serde_json::to_string(&TrayRequest::GetStatus).unwrap();
+        writeln!(writer, "{req}").unwrap();
+        writer.flush().unwrap();
+
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).unwrap();
+        let resp: TrayResponse = serde_json::from_str(resp_line.trim()).unwrap();
+
+        match resp {
+            TrayResponse::Status(info) => assert!(info.online),
+            _ => panic!("expected Status"),
+        }
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn ipc_server_handles_progress_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock_path = tmp.path().join("test_progress.sock");
+
+        let progress = crate::sync::progress::SyncProgress::new();
+        progress.set_scanning();
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let progress_clone = progress.clone();
+
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            let mut writer = BufWriter::new(&stream);
+
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let _req: TrayRequest = serde_json::from_str(line.trim()).unwrap();
+
+            let response = TrayResponse::Progress(progress_clone.snapshot());
+            let json = serde_json::to_string(&response).unwrap();
+            writeln!(writer, "{json}").unwrap();
+            writer.flush().unwrap();
+        });
+
+        let stream = UnixStream::connect(&sock_path).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut writer = BufWriter::new(&stream);
+        let mut reader = BufReader::new(reader_stream);
+
+        let req = serde_json::to_string(&TrayRequest::GetProgress).unwrap();
+        writeln!(writer, "{req}").unwrap();
+        writer.flush().unwrap();
+
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).unwrap();
+        let resp: TrayResponse = serde_json::from_str(resp_line.trim()).unwrap();
+
+        match resp {
+            TrayResponse::Progress(info) => {
+                assert_eq!(info.phase, crate::sync::progress::SyncPhase::Scanning);
+            }
+            _ => panic!("expected Progress"),
+        }
+
+        handle.join().unwrap();
     }
 }
 
