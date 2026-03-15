@@ -16,6 +16,9 @@ build() {
     # makepkg's CFLAGS/LDFLAGS interfere with aws-lc-sys's internal cmake build.
     unset CARGO_ENCODED_RUSTFLAGS
     unset CFLAGS CXXFLAGS LDFLAGS RUSTFLAGS
+    # Patch winit 0.30.13 for Rust 1.94+ type inference compatibility
+    cargo fetch
+    bash patches/patch-winit.sh
     cargo build --release
     cmake -B build-dolphin -S plugins/dolphin \
         -DCMAKE_INSTALL_PREFIX=/usr \
