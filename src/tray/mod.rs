@@ -280,8 +280,8 @@ pub fn run_tray() -> Result<()> {
                 .conflicts
         };
 
-        let mut has_conflicts = false;
-        let mut is_online = true;
+        let mut has_conflicts;
+        let mut is_online;
 
         loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
@@ -308,6 +308,8 @@ pub fn run_tray() -> Result<()> {
                 prev_conflicts = new_conflicts;
             } else {
                 // Daemon not reachable
+                is_online = false;
+                has_conflicts = false;
                 handle.update(|tray| {
                     tray.icon_state = TrayIconState::Offline;
                 });

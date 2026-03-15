@@ -90,6 +90,7 @@ pub struct StatusInfo {
     pub synced: u64,
     pub pending: u64,
     pub conflicts: u64,
+    #[serde(default)]
     pub paused: bool,
 }
 

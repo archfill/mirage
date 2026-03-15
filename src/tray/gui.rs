@@ -103,12 +103,12 @@ fn format_bytes(bytes: u64) -> String {
 
 /// Try to acquire the GUI lock file. Returns the lock path if successful, None if another instance
 /// is already running.
-fn acquire_gui_lock() -> Option<PathBuf> {
+fn acquire_gui_lock(name: &str) -> Option<PathBuf> {
     let lock_dir = dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("mirage");
     let _ = fs::create_dir_all(&lock_dir);
-    let lock_path = lock_dir.join("gui.lock");
+    let lock_path = lock_dir.join(format!("{}.lock", name));
 
     // Check if another GUI instance is running
     if let Ok(pid_str) = fs::read_to_string(&lock_path)
@@ -343,13 +343,18 @@ impl eframe::App for MirageApp {
                             return;
                         }
                     };
+                    let cache_bytes = match cache_mb.checked_mul(1_048_576) {
+                        Some(v) => v,
+                        None => {
+                            self.settings_save_msg =
+                                Some(("Cache limit value too large".to_string(), Instant::now()));
+                            return;
+                        }
+                    };
 
                     let fields = vec![
                         ("sync_interval_secs".to_string(), sync_interval.to_string()),
-                        (
-                            "cache_limit_bytes".to_string(),
-                            (cache_mb * 1_048_576).to_string(),
-                        ),
+                        ("cache_limit_bytes".to_string(), cache_bytes.to_string()),
                         (
                             "remote_base_path".to_string(),
                             self.settings_remote_path.clone(),
@@ -392,7 +397,7 @@ impl eframe::App for MirageApp {
 ///
 /// Call from a dedicated thread — this function runs the eframe event loop.
 pub fn open_activity_window(mount_point: PathBuf, window_open: Arc<AtomicBool>) {
-    let Some(lock_path) = acquire_gui_lock() else {
+    let Some(lock_path) = acquire_gui_lock("gui-activity") else {
         return;
     };
 
@@ -429,7 +434,7 @@ pub fn open_activity_window(mount_point: PathBuf, window_open: Arc<AtomicBool>) 
 
 /// Open the settings window directly. Blocks until the window is closed.
 pub fn open_settings_window(mount_point: PathBuf) {
-    let Some(lock_path) = acquire_gui_lock() else {
+    let Some(lock_path) = acquire_gui_lock("gui-settings") else {
         return;
     };
 

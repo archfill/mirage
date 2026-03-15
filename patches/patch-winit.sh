@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-WINIT_SRC=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 1 -name 'index.crates.io-*' -print -quit)/winit-0.30.13/src/window.rs
+WINIT_SRC=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path '*/winit-0.30.13/src/window.rs' -print -quit)
 
 if [ ! -f "$WINIT_SRC" ]; then
     echo "winit-0.30.13 source not found; run 'cargo fetch' first."
