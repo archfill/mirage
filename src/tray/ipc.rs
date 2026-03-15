@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,13 @@ pub enum TrayRequest {
         path: String,
         pinned: bool,
         recursive: bool,
+    },
+    PauseSync,
+    ResumeSync,
+    GetConfig,
+    SetConfig {
+        key: String,
+        value: String,
     },
     Quit,
 }
@@ -63,8 +70,18 @@ pub enum TrayResponse {
     Status(StatusInfo),
     Progress(crate::sync::progress::ProgressInfo),
     FileInfo(FileInfo),
+    Config(ConfigData),
     Ok,
     Error(String),
+}
+
+/// Subset of config values editable via GUI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigData {
+    pub sync_interval_secs: u64,
+    pub cache_limit_bytes: u64,
+    pub remote_base_path: String,
+    pub log_level: String,
 }
 
 /// A point-in-time snapshot of the daemon's sync status.
@@ -74,6 +91,7 @@ pub struct StatusInfo {
     pub synced: u64,
     pub pending: u64,
     pub conflicts: u64,
+    pub paused: bool,
 }
 
 // ── Socket path ───────────────────────────────────────────────────────────────
@@ -100,6 +118,7 @@ pub struct IpcServer {
     path: PathBuf,
     progress: Option<crate::sync::progress::SyncProgress>,
     mount_point: PathBuf,
+    sync_paused: Arc<AtomicBool>,
 }
 
 impl IpcServer {
@@ -115,6 +134,7 @@ impl IpcServer {
         net_state: Arc<AtomicU8>,
         progress: Option<crate::sync::progress::SyncProgress>,
         mount_point: PathBuf,
+        sync_paused: Arc<AtomicBool>,
     ) -> Result<Self> {
         let path = socket_path();
 
@@ -141,6 +161,7 @@ impl IpcServer {
             path,
             progress,
             mount_point,
+            sync_paused,
         })
     }
 
@@ -227,6 +248,49 @@ impl IpcServer {
                 recursive,
             } => {
                 let response = self.build_set_pinned_response(&path, pinned, recursive);
+                let _ = self.write_response(&mut writer, &response);
+                false
+            }
+            TrayRequest::PauseSync => {
+                self.sync_paused.store(true, Ordering::SeqCst);
+                if let Some(ref p) = self.progress {
+                    p.set_paused();
+                }
+                let _ = self.write_response(&mut writer, &TrayResponse::Ok);
+                false
+            }
+            TrayRequest::ResumeSync => {
+                self.sync_paused.store(false, Ordering::SeqCst);
+                if let Some(ref p) = self.progress {
+                    p.set_idle();
+                }
+                let _ = self.write_response(&mut writer, &TrayResponse::Ok);
+                false
+            }
+            TrayRequest::GetConfig => {
+                let response = match crate::config::Config::load() {
+                    Ok(cfg) => TrayResponse::Config(ConfigData {
+                        sync_interval_secs: cfg.sync_interval_secs,
+                        cache_limit_bytes: cfg.cache_limit_bytes,
+                        remote_base_path: cfg.remote_base_path.unwrap_or_default(),
+                        log_level: cfg.log_level.unwrap_or_default(),
+                    }),
+                    Err(e) => TrayResponse::Error(e.to_string()),
+                };
+                let _ = self.write_response(&mut writer, &response);
+                false
+            }
+            TrayRequest::SetConfig { key, value } => {
+                let response = match crate::config::Config::load() {
+                    Ok(mut cfg) => match cfg.set_field(&key, &value) {
+                        Ok(()) => match cfg.save() {
+                            Ok(()) => TrayResponse::Ok,
+                            Err(e) => TrayResponse::Error(e.to_string()),
+                        },
+                        Err(e) => TrayResponse::Error(e.to_string()),
+                    },
+                    Err(e) => TrayResponse::Error(e.to_string()),
+                };
                 let _ = self.write_response(&mut writer, &response);
                 false
             }
@@ -400,12 +464,14 @@ impl IpcServer {
         };
 
         let online = self.net_state.load(Ordering::Relaxed) == 0;
+        let paused = self.sync_paused.load(Ordering::Relaxed);
 
         TrayResponse::Status(StatusInfo {
             online,
             synced,
             pending: pending_up + pending_down,
             conflicts,
+            paused,
         })
     }
 }
@@ -576,6 +642,7 @@ mod tests {
             synced: 10,
             pending: 2,
             conflicts: 1,
+            paused: false,
         });
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: TrayResponse = serde_json::from_str(&json).unwrap();
@@ -657,6 +724,7 @@ mod tests {
                 synced: 0,
                 pending: 0,
                 conflicts: 0,
+                paused: false,
             });
             let json = serde_json::to_string(&response).unwrap();
             writeln!(writer, "{json}").unwrap();

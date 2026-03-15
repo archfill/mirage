@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SyncPhase {
     Idle,
+    Paused,
     Scanning,
     Downloading,
     Uploading,
@@ -59,6 +60,12 @@ impl SyncProgress {
     pub fn set_idle(&self) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         *guard = ProgressInfo::default();
+    }
+
+    pub fn set_paused(&self) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.phase = SyncPhase::Paused;
+        guard.current_file = None;
     }
 
     pub fn set_scanning(&self) {
