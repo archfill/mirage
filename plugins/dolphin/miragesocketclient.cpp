@@ -61,9 +61,10 @@ FileStatus MirageSocketClient::queryFileStatus(const QString &path)
 
     const QJsonObject obj = doc.object();
 
-    // Response format: {"FileStatus":"Cached"} or {"Error":"..."}
-    if (obj.contains(QStringLiteral("FileStatus"))) {
-        const QString status = obj[QStringLiteral("FileStatus")].toString();
+    // Response format: {"FileInfo":{"status":"Cached","is_pinned":...,"is_dir":...}}
+    if (obj.contains(QStringLiteral("FileInfo"))) {
+        const QJsonObject info = obj[QStringLiteral("FileInfo")].toObject();
+        const QString status = info[QStringLiteral("status")].toString();
         if (status == QStringLiteral("CloudOnly")) return FileStatus::CloudOnly;
         if (status == QStringLiteral("Cached"))    return FileStatus::Cached;
         if (status == QStringLiteral("Syncing"))   return FileStatus::Syncing;
