@@ -16,10 +16,10 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
+toml = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-quick-xml = "0.37"
+quick-xml = "0.39"
 bytes = "1"
 secrecy = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
@@ -32,7 +32,7 @@ ksni = "0.2"
 notify-rust = "4"
 serde_json = "1"
 globset = "0.4"
-lru = "0.12"
+lru = "0.16"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"

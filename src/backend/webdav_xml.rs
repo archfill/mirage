@@ -101,8 +101,8 @@ pub fn parse_propfind_response(xml: &str, dav_base_path: &str) -> Result<Vec<Rem
             Ok(Event::Text(e)) => {
                 if let Some(ref tag) = current_tag {
                     let text = e
-                        .unescape()
-                        .map_err(|err| Error::XmlParse(format!("text unescape: {err}")))?
+                        .decode()
+                        .map_err(|err| Error::XmlParse(format!("text decode: {err}")))?
                         .to_string();
 
                     match tag.as_str() {
