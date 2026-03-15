@@ -96,6 +96,27 @@
 - [x] `mirage resolve <path> <keep-local|keep-remote|keep-both>` - resolve conflict
 - [x] `mirage daemon start|stop|status` - daemon management
 - [x] `mirage tray` - launch system tray application
+- [x] `mirage config list` - show all configuration values
+- [x] `mirage config get <key>` - show specific config value
+- [x] `mirage config set <key> <value>` - update config value
+- [x] `mirage setup` - interactive setup with connection test and keyring password storage
+- [x] `mirage logs [-f] [-n N]` - view daemon logs via journalctl
+
+## Dolphin Integration
+
+- [x] Overlay icon plugin (sync status badges on file icons)
+- [x] Context menu plugin (pin/unpin actions in right-click menu)
+- [x] IPC-based communication with daemon (`GetFileStatus`, `SetPinned`)
+
+## Packaging
+
+- [x] Arch Linux PKGBUILD (`dist/`)
+- [x] Shell completions (bash, zsh, fish) via clap_complete
+- [x] Man page generation via clap_mangen
+- [x] Desktop files (application launcher + tray autostart)
+- [x] Application SVG icon
+- [x] Default `.mirageignore` template
+- [x] systemd user service with D-Bus session access for keyring
 
 ## System Tray
 
