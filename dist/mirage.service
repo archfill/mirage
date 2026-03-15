@@ -1,0 +1,15 @@
+[Unit]
+Description=Mirage cloud filesystem daemon
+After=network-online.target dbus.socket
+
+[Service]
+Type=simple
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=RUST_LOG=info
+ExecStart=/usr/bin/mirage daemon start
+ExecStop=/usr/bin/mirage daemon stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

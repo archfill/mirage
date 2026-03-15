@@ -54,7 +54,118 @@ pub fn run(command: &Command) -> Result<()> {
         Command::Logs { follow, lines } => {
             run_logs(*follow, *lines)?;
         }
+        Command::Setup => {
+            run_setup()?;
+        }
     }
+    Ok(())
+}
+
+fn prompt_input(prompt: &str, default: &str) -> Result<String> {
+    use std::io::Write;
+    if default.is_empty() {
+        print!("{prompt}: ");
+    } else {
+        print!("{prompt} [{default}]: ");
+    }
+    std::io::stdout().flush().map_err(Error::Io)?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).map_err(Error::Io)?;
+    let input = input.trim();
+    if input.is_empty() {
+        Ok(default.to_owned())
+    } else {
+        Ok(input.to_owned())
+    }
+}
+
+fn run_setup() -> Result<()> {
+    use backend::Backend as _;
+
+    // Load existing config if available, otherwise use defaults
+    let existing = config::Config::load().ok();
+    let config_path = config::Config::config_path()?;
+
+    println!("Mirage setup");
+    println!();
+
+    let server_url = prompt_input(
+        "Server URL",
+        existing
+            .as_ref()
+            .map(|c| c.server_url.as_str())
+            .unwrap_or("https://cloud.example.com"),
+    )?;
+    if server_url.is_empty() || !server_url.starts_with("http") {
+        return Err(Error::Config("invalid server URL".into()));
+    }
+
+    let username = prompt_input(
+        "Username",
+        existing.as_ref().map(|c| c.username.as_str()).unwrap_or(""),
+    )?;
+    if username.is_empty() {
+        return Err(Error::Config("username cannot be empty".into()));
+    }
+
+    print!("Password: ");
+    std::io::Write::flush(&mut std::io::stdout()).map_err(Error::Io)?;
+    let password = rpassword::read_password()
+        .map_err(|e| Error::Config(format!("failed to read password: {e}")))?;
+    if password.is_empty() {
+        return Err(Error::Config("password cannot be empty".into()));
+    }
+
+    // Test connection
+    println!("Testing connection...");
+    let test_cfg = config::Config {
+        server_url: server_url.clone(),
+        username: username.clone(),
+        password: Some(password.clone()),
+        ..existing.clone().unwrap_or_else(|| config::Config {
+            server_url: server_url.clone(),
+            username: username.clone(),
+            password: None,
+            cache_dir: dirs::cache_dir().unwrap_or_default().join("mirage"),
+            cache_limit_bytes: 1_073_741_824,
+            mount_point: dirs::home_dir().unwrap_or_default().join("Cloud"),
+            sync_interval_secs: 300,
+            retry_base_secs: 30,
+            retry_max_secs: 600,
+            always_local_paths: vec![],
+            connect_timeout_secs: 10,
+            request_timeout_secs: 60,
+            ignore_file: None,
+            remote_base_path: None,
+            log_level: None,
+        })
+    };
+    let nc = backend::nextcloud::NextcloudClient::new(&test_cfg)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(nc.ping())?;
+    println!("Connection successful.");
+
+    // Save config.toml (without password)
+    let save_cfg = config::Config {
+        password: None,
+        ..test_cfg
+    };
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let toml_str = toml::to_string_pretty(&save_cfg)
+        .map_err(|e| Error::Config(format!("failed to serialize config: {e}")))?;
+    std::fs::write(&config_path, &toml_str)?;
+    println!("Config saved: {}", config_path.display());
+
+    // Store password in keyring
+    let entry = keyring::Entry::new("mirage", &username)
+        .map_err(|e| Error::Config(format!("failed to access keyring: {e}")))?;
+    entry
+        .set_password(&password)
+        .map_err(|e| Error::Config(format!("failed to store password in keyring: {e}")))?;
+    println!("Password stored in system keyring.");
+
     Ok(())
 }
 
@@ -263,6 +374,41 @@ fn run_unmount() -> Result<()> {
 fn run_config(action: &Option<ConfigAction>) -> Result<()> {
     let path = config::Config::config_path()?;
     match action {
+        Some(ConfigAction::List) => {
+            let cfg = config::Config::load()?;
+            let keys = [
+                "server_url",
+                "username",
+                "password",
+                "cache_dir",
+                "cache_limit_bytes",
+                "mount_point",
+                "sync_interval_secs",
+                "retry_base_secs",
+                "retry_max_secs",
+                "always_local_paths",
+                "connect_timeout_secs",
+                "request_timeout_secs",
+                "ignore_file",
+                "remote_base_path",
+                "log_level",
+            ];
+            for key in keys {
+                let value = cfg.get_field(key)?;
+                println!("{key:<24}= {value}");
+            }
+        }
+        Some(ConfigAction::Get { key }) => {
+            let cfg = config::Config::load()?;
+            let value = cfg.get_field(key)?;
+            println!("{value}");
+        }
+        Some(ConfigAction::Set { key, value }) => {
+            let mut cfg = config::Config::load()?;
+            cfg.set_field(key, value)?;
+            cfg.save()?;
+            println!("{key} = {value}");
+        }
         Some(ConfigAction::Init { force }) => {
             if path.exists() && !force {
                 return Err(Error::Config(format!(
@@ -532,8 +678,10 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
     // Spawn IPC server thread for tray communication.
     let ipc_db = db::Database::open(&db_path)?;
     let ipc_net_state = net_monitor.shared();
+    let ipc_mount_point = mountpoint.to_path_buf();
     std::thread::spawn(move || {
-        match tray::ipc::IpcServer::new(ipc_db, ipc_net_state, Some(ipc_progress)) {
+        match tray::ipc::IpcServer::new(ipc_db, ipc_net_state, Some(ipc_progress), ipc_mount_point)
+        {
             Ok(server) => server.run(),
             Err(e) => tracing::warn!(error = %e, "failed to start IPC server"),
         }

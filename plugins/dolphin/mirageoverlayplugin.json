@@ -1,0 +1,8 @@
+{
+  "KPlugin": {
+    "Name": "Mirage Overlay Icons",
+    "Description": "Shows sync status overlay icons for mirage cloud files",
+    "Icon": "cloud",
+    "ServiceTypes": ["KOverlayIconPlugin"]
+  }
+}

@@ -23,7 +23,38 @@ use crate::error::{Error, Result};
 pub enum TrayRequest {
     GetStatus,
     GetProgress,
+    GetFileStatus {
+        path: String,
+    },
+    SetPinned {
+        path: String,
+        pinned: bool,
+        recursive: bool,
+    },
     Quit,
+}
+
+/// The synchronisation/cache status of a single file or directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileStatus {
+    /// Path is outside the mount point or otherwise unmanaged.
+    Unknown,
+    /// File exists only in the cloud; not downloaded locally.
+    CloudOnly,
+    /// File is fully cached on disk.
+    Cached,
+    /// File is currently being uploaded or downloaded.
+    Syncing,
+    /// File is in a conflict state.
+    Error,
+}
+
+/// Extended information about a file or directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub status: FileStatus,
+    pub is_pinned: bool,
+    pub is_dir: bool,
 }
 
 /// Responses the daemon sends back.
@@ -31,6 +62,7 @@ pub enum TrayRequest {
 pub enum TrayResponse {
     Status(StatusInfo),
     Progress(crate::sync::progress::ProgressInfo),
+    FileInfo(FileInfo),
     Ok,
     Error(String),
 }
@@ -67,6 +99,7 @@ pub struct IpcServer {
     net_state: Arc<AtomicU8>,
     path: PathBuf,
     progress: Option<crate::sync::progress::SyncProgress>,
+    mount_point: PathBuf,
 }
 
 impl IpcServer {
@@ -81,6 +114,7 @@ impl IpcServer {
         db: crate::db::Database,
         net_state: Arc<AtomicU8>,
         progress: Option<crate::sync::progress::SyncProgress>,
+        mount_point: PathBuf,
     ) -> Result<Self> {
         let path = socket_path();
 
@@ -106,6 +140,7 @@ impl IpcServer {
             net_state,
             path,
             progress,
+            mount_point,
         })
     }
 
@@ -181,6 +216,20 @@ impl IpcServer {
                 let _ = self.write_response(&mut writer, &response);
                 false
             }
+            TrayRequest::GetFileStatus { path } => {
+                let response = self.build_file_status_response(&path);
+                let _ = self.write_response(&mut writer, &response);
+                false
+            }
+            TrayRequest::SetPinned {
+                path,
+                pinned,
+                recursive,
+            } => {
+                let response = self.build_set_pinned_response(&path, pinned, recursive);
+                let _ = self.write_response(&mut writer, &response);
+                false
+            }
             TrayRequest::Quit => {
                 let _ = self.write_response(&mut writer, &TrayResponse::Ok);
                 true
@@ -206,6 +255,113 @@ impl IpcServer {
                 }
                 true
             }
+        }
+    }
+
+    /// Walk the virtual filesystem path in the DB and return the file's status.
+    fn build_file_status_response(&self, path: &str) -> TrayResponse {
+        let abs = std::path::Path::new(path);
+
+        // Strip the mount point prefix to get the relative path components.
+        let rel = match abs.strip_prefix(&self.mount_point) {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::trace!(path, "IPC: GetFileStatus path is outside mount point");
+                return TrayResponse::FileInfo(FileInfo {
+                    status: FileStatus::Unknown,
+                    is_pinned: false,
+                    is_dir: abs.is_dir(),
+                });
+            }
+        };
+
+        // Walk components from the root inode (1), keeping the last FileEntry.
+        let mut parent: u64 = 1;
+        let mut last_entry = None;
+
+        for component in rel.components() {
+            let name = component.as_os_str().to_string_lossy();
+            match self.db.lookup(parent, &name) {
+                Ok(entry) => {
+                    parent = entry.inode;
+                    last_entry = Some(entry);
+                }
+                Err(_) => {
+                    tracing::debug!(path, "IPC: GetFileStatus entry not found");
+                    return TrayResponse::Error(format!("path {path} not found"));
+                }
+            }
+        }
+
+        // If no components were walked the path is the mount root itself — a directory.
+        let entry = match last_entry {
+            Some(e) => e,
+            None => {
+                return TrayResponse::FileInfo(FileInfo {
+                    status: FileStatus::Cached,
+                    is_pinned: false,
+                    is_dir: true,
+                });
+            }
+        };
+
+        let status = match entry.sync_state {
+            SyncState::PendingUpload | SyncState::PendingDownload => FileStatus::Syncing,
+            SyncState::Conflict => FileStatus::Error,
+            _ if entry.is_dir => FileStatus::Cached,
+            _ if entry.is_cached => FileStatus::Cached,
+            _ => FileStatus::CloudOnly,
+        };
+
+        TrayResponse::FileInfo(FileInfo {
+            status,
+            is_pinned: entry.is_pinned,
+            is_dir: entry.is_dir,
+        })
+    }
+
+    /// Walk the virtual filesystem path in the DB and set the pinned flag.
+    fn build_set_pinned_response(&self, path: &str, pinned: bool, recursive: bool) -> TrayResponse {
+        let abs = std::path::Path::new(path);
+        let rel = match abs.strip_prefix(&self.mount_point) {
+            Ok(p) => p,
+            Err(_) => {
+                return TrayResponse::Error(format!("path {path} is outside mount point"));
+            }
+        };
+
+        let mut parent: u64 = 1;
+        let mut last_entry = None;
+        for component in rel.components() {
+            let name = component.as_os_str().to_string_lossy();
+            match self.db.lookup(parent, &name) {
+                Ok(entry) => {
+                    parent = entry.inode;
+                    last_entry = Some(entry);
+                }
+                Err(_) => {
+                    return TrayResponse::Error(format!("path {path} not found"));
+                }
+            }
+        }
+
+        let inode = match last_entry {
+            Some(e) => e.inode,
+            None => 1, // root
+        };
+
+        let result = if recursive {
+            self.db.set_pinned_recursive(inode, pinned)
+        } else {
+            self.db.set_pinned(inode, pinned).map(|()| 1)
+        };
+
+        match result {
+            Ok(_) => {
+                tracing::info!(path, pinned, recursive, "IPC: set_pinned");
+                TrayResponse::Ok
+            }
+            Err(e) => TrayResponse::Error(e.to_string()),
         }
     }
 
@@ -327,6 +483,90 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let parsed: TrayRequest = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, TrayRequest::Quit));
+    }
+
+    #[test]
+    fn get_file_status_request_serialization() {
+        let req = TrayRequest::GetFileStatus {
+            path: "/mnt/mirage/docs/report.pdf".to_owned(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: TrayRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TrayRequest::GetFileStatus { path } => {
+                assert_eq!(path, "/mnt/mirage/docs/report.pdf");
+            }
+            _ => panic!("expected GetFileStatus request"),
+        }
+    }
+
+    #[test]
+    fn file_status_response_serialization() {
+        for status in [
+            FileStatus::Unknown,
+            FileStatus::CloudOnly,
+            FileStatus::Cached,
+            FileStatus::Syncing,
+            FileStatus::Error,
+        ] {
+            let resp = TrayResponse::FileInfo(FileInfo {
+                status,
+                is_pinned: false,
+                is_dir: false,
+            });
+            let json = serde_json::to_string(&resp).unwrap();
+            let parsed: TrayResponse = serde_json::from_str(&json).unwrap();
+            match parsed {
+                TrayResponse::FileInfo(info) => {
+                    assert_eq!(info.status, status);
+                    assert!(!info.is_pinned);
+                    assert!(!info.is_dir);
+                }
+                _ => panic!("expected FileInfo response"),
+            }
+        }
+    }
+
+    #[test]
+    fn set_pinned_request_serialization() {
+        let req = TrayRequest::SetPinned {
+            path: "/mnt/mirage/docs".to_owned(),
+            pinned: true,
+            recursive: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: TrayRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TrayRequest::SetPinned {
+                path,
+                pinned,
+                recursive,
+            } => {
+                assert_eq!(path, "/mnt/mirage/docs");
+                assert!(pinned);
+                assert!(!recursive);
+            }
+            _ => panic!("expected SetPinned request"),
+        }
+    }
+
+    #[test]
+    fn file_info_pinned_serialization() {
+        let resp = TrayResponse::FileInfo(FileInfo {
+            status: FileStatus::Cached,
+            is_pinned: true,
+            is_dir: true,
+        });
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: TrayResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TrayResponse::FileInfo(info) => {
+                assert_eq!(info.status, FileStatus::Cached);
+                assert!(info.is_pinned);
+                assert!(info.is_dir);
+            }
+            _ => panic!("expected FileInfo response"),
+        }
     }
 
     #[test]

@@ -1,9 +1,5 @@
 # Mirage
 
-![Status](https://img.shields.io/badge/status-WIP-yellow)
-
-> **Note:** This project is in early development and not yet functional. APIs, architecture, and features are subject to change.
-
 Linux向けのクラウドファイル同期クライアント。
 FUSE ベースの仮想ファイルシステムにより、ファイルをオンデマンドでダウンロードしながら、通常のディレクトリと同じように操作できます。
 
@@ -16,9 +12,24 @@ FUSE ベースの仮想ファイルシステムにより、ファイルをオン
 - **LRUキャッシュ** - 設定した容量上限でキャッシュを自動管理
 - **システムトレイ統合** - KDE / GNOME / XFCE 対応
 
+## Installation
+
+### Arch Linux
+
+```bash
+cd dist/
+makepkg -si
+```
+
 ## Usage
 
 ```bash
+# 初回セットアップ（接続テスト + パスワードをキーリングに保存）
+mirage setup
+
+# デーモン起動
+mirage daemon start
+
 # マウント
 mirage mount ~/cloud
 
@@ -33,6 +44,16 @@ mirage status
 
 # アンマウント
 mirage unmount
+
+# 設定を確認・変更
+mirage config list
+mirage config get server_url
+mirage config set server_url https://cloud.example.com
+
+# デーモンのログを確認
+mirage logs
+mirage logs -f          # フォロー
+mirage logs -n 50       # 直近50行
 ```
 
 ## Architecture

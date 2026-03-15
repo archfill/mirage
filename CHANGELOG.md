@@ -24,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `.mirageignore` support for filtering files during sync
 - `remote_base_path` config for scoping sync to specific subfolders
 - Sync progress tracking with phase/file/byte counters
+- `mirage config list/get/set` subcommands for CLI config management
+- `mirage setup` command for interactive setup with keyring password storage
+- `mirage logs [-f] [-n N]` command for viewing daemon logs via journalctl
+- IPC `GetFileStatus` and `SetPinned` commands for Dolphin plugin integration
+- Dolphin file manager plugins (overlay icons, context menu pin/unpin actions)
+- Shell completions (bash, zsh, fish) via clap_complete
+- Man page generation via clap_mangen
+- Desktop files for application launcher and tray autostart
+- Application SVG icon
+- Default `.mirageignore` template installed with package
+- Structured tracing instrumentation across backend, database, and network modules
+- Keyring-based password storage (keyring crate with linux-native feature)
+- systemd user service with D-Bus session access for keyring
 
 ### Fixed
 
@@ -36,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - O(n) LRU promote operation (#7)
 - PID file truncated before flock acquisition (#8)
 - No rollback on rename remote failure (#9)
+- systemd service unable to access keyring (missing `DBUS_SESSION_BUS_ADDRESS`)
+- Noisy IPC log spam for paths outside the mount point
+- Signal-based FUSE cleanup replacing AutoUnmount for reliable unmount on daemon exit
 
 ## [0.0.0] - 2026-03-13
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mirage Tray
+Comment=System tray for Mirage cloud sync
+Exec=/usr/bin/mirage tray
+Icon=mirage
+Terminal=false
+Categories=System;FileManager;
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after-phase=1

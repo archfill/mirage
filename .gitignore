@@ -1,5 +1,9 @@
 # Build artifacts
 /target/
+/build-dolphin/
+/dist/pkg/
+/dist/src/
+/dist/*.pkg.tar.zst
 
 # IDE
 .idea/

@@ -1,0 +1,10 @@
+{
+  "KPlugin": {
+    "Name": "Mirage Pin Actions",
+    "Description": "Pin/unpin files in mirage cloud storage from Dolphin context menu",
+    "Icon": "pin",
+    "MimeTypes": ["application/octet-stream", "inode/directory"],
+    "ServiceTypes": ["KFileItemAction/Plugin"]
+  },
+  "MimeType": "application/octet-stream;inode/directory;"
+}

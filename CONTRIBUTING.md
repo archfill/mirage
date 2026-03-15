@@ -10,6 +10,10 @@ Thank you for your interest in contributing to Mirage!
 - System libraries:
   - `libfuse3-dev` (Ubuntu/Debian) or `fuse3` (Arch)
   - `libdbus-1-dev` (Ubuntu/Debian) or `dbus` (Arch)
+  - `cmake`
+  - `extra-cmake-modules`
+  - `qt6-base-dev` (Ubuntu/Debian) or `qt6-base` (Arch)
+  - `kio-dev` (Ubuntu/Debian) or `kio` (Arch) — required for Dolphin plugins
 
 ### Build & Test
 
@@ -18,6 +22,21 @@ cargo build          # Build
 cargo test           # Run tests
 cargo clippy         # Lint (must have zero warnings)
 cargo fmt -- --check # Check formatting
+```
+
+A `Makefile` is also provided for common tasks:
+
+```bash
+make build    # Build release binary
+make test     # Run tests + clippy + fmt check
+make install  # Install to system (copies binary, completions, desktop files, etc.)
+```
+
+For Arch Linux packaging:
+
+```bash
+cd dist/
+makepkg -si   # Build and install the package
 ```
 
 ## How to Contribute
