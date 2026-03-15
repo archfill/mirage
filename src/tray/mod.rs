@@ -253,9 +253,12 @@ pub fn run_tray() -> Result<()> {
         }
     };
 
+    let initial_progress = try_get_progress().unwrap_or_default();
+    let initial_paused = initial_status.paused;
+
     let status = Arc::new(Mutex::new(initial_status));
-    let progress = Arc::new(Mutex::new(crate::sync::progress::ProgressInfo::default()));
-    let paused = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(initial_progress));
+    let paused = Arc::new(AtomicBool::new(initial_paused));
 
     let tray = MirageTray {
         status: Arc::clone(&status),
