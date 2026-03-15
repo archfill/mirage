@@ -24,18 +24,18 @@ QJsonDocument MirageSocketClient::sendRequest(const QJsonObject &request)
 
     QLocalSocket socket;
     socket.connectToServer(socketPath());
-    if (!socket.waitForConnected(500)) {
+    if (!socket.waitForConnected(100)) {
         return {};
     }
 
     QByteArray data = QJsonDocument(request).toJson(QJsonDocument::Compact);
     data.append('\n');
     socket.write(data);
-    if (!socket.waitForBytesWritten(500)) {
+    if (!socket.waitForBytesWritten(200)) {
         return {};
     }
 
-    if (!socket.waitForReadyRead(1000)) {
+    if (!socket.waitForReadyRead(200)) {
         return {};
     }
 

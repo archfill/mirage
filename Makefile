@@ -32,7 +32,7 @@ install: build
 uninstall:
 	sudo rm -f $(INSTALL_BIN)
 	@if [ -f $(CMAKE_BUILD)/install_manifest.txt ]; then \
-		sudo xargs rm -f < $(CMAKE_BUILD)/install_manifest.txt; \
+		sudo xargs -d '\n' rm -f < $(CMAKE_BUILD)/install_manifest.txt; \
 		echo "Plugins removed."; \
 	else \
 		echo "No install_manifest.txt found. Run 'make install' first."; \

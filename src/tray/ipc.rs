@@ -37,6 +37,8 @@ pub enum TrayRequest {
 /// The synchronisation/cache status of a single file or directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileStatus {
+    /// Path is outside the mount point or otherwise unmanaged.
+    Unknown,
     /// File exists only in the cloud; not downloaded locally.
     CloudOnly,
     /// File is fully cached on disk.
@@ -265,7 +267,11 @@ impl IpcServer {
             Ok(p) => p,
             Err(_) => {
                 tracing::trace!(path, "IPC: GetFileStatus path is outside mount point");
-                return TrayResponse::Error(format!("path {path} is outside mount point"));
+                return TrayResponse::FileInfo(FileInfo {
+                    status: FileStatus::Unknown,
+                    is_pinned: false,
+                    is_dir: abs.is_dir(),
+                });
             }
         };
 
@@ -497,6 +503,7 @@ mod tests {
     #[test]
     fn file_status_response_serialization() {
         for status in [
+            FileStatus::Unknown,
             FileStatus::CloudOnly,
             FileStatus::Cached,
             FileStatus::Syncing,
