@@ -4,17 +4,23 @@
 
 # Mirage
 
-Linux向けのクラウドファイル同期クライアント。
-FUSE ベースの仮想ファイルシステムにより、ファイルをオンデマンドでダウンロードしながら、通常のディレクトリと同じように操作できます。
+[![CI](https://github.com/archfill/mirage/actions/workflows/ci.yml/badge.svg)](https://github.com/archfill/mirage/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-yellow.svg)](https://github.com/archfill/mirage)
+
+[![日本語](https://img.shields.io/badge/lang-日本語-red.svg)](README.ja.md)
+
+A cloud file sync client for Linux.
+Using a FUSE-based virtual filesystem, files are downloaded on demand while being accessible just like a regular directory.
 
 ## Features
 
-- **オンデマンドダウンロード** - ファイルを開いた時に初めてダウンロード。ストレージを節約
-- **常時同期モード** - 重要なフォルダは常にローカルに保持（`mirage pin`）
-- **オフライン対応** - キャッシュ済みファイルはオフラインでも読み書き可能
-- **高速なディレクトリ操作** - ローカルDBからメタデータを即応答
-- **LRUキャッシュ** - 設定した容量上限でキャッシュを自動管理
-- **システムトレイ統合** - KDE / GNOME / XFCE 対応
+- **On-demand download** - Files are downloaded only when opened, saving local storage
+- **Always-sync mode** - Keep important folders permanently local (`mirage pin`)
+- **Offline support** - Cached files remain readable and writable without a network connection
+- **Fast directory operations** - Metadata is served instantly from a local database
+- **LRU cache** - Cache size is managed automatically within a configured limit
+- **System tray integration** - Supports KDE / GNOME / XFCE
 
 ## Installation
 
@@ -28,36 +34,36 @@ makepkg -si
 ## Usage
 
 ```bash
-# 初回セットアップ（接続テスト + パスワードをキーリングに保存）
+# Initial setup (connection test + save password to keyring)
 mirage setup
 
-# デーモン起動
+# Start the daemon
 mirage daemon start
 
-# マウント
+# Mount
 mirage mount ~/cloud
 
-# ファイルを常にローカルに保持
+# Keep a file or folder permanently local
 mirage pin ~/cloud/important
 
-# オンデマンドに戻す
+# Switch back to on-demand
 mirage unpin ~/cloud/important
 
-# 同期状態・キャッシュ使用量を確認
+# Check sync status and cache usage
 mirage status
 
-# アンマウント
+# Unmount
 mirage unmount
 
-# 設定を確認・変更
+# View or change configuration
 mirage config list
 mirage config get server_url
 mirage config set server_url https://cloud.example.com
 
-# デーモンのログを確認
+# View daemon logs
 mirage logs
-mirage logs -f          # フォロー
-mirage logs -n 50       # 直近50行
+mirage logs -f          # follow
+mirage logs -n 50       # last 50 lines
 ```
 
 ## Architecture
