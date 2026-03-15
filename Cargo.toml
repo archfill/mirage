@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-quick-xml = "0.37"
+quick-xml = "0.39"
 bytes = "1"
 secrecy = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
