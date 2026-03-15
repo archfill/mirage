@@ -25,6 +25,12 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev libdbus-1-dev
 
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Patch winit for Rust 1.94+ compatibility
+        run: bash patches/patch-winit.sh
+
       - name: Check formatting
         run: cargo fmt -- --check
 

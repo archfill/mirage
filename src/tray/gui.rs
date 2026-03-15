@@ -1,6 +1,8 @@
 // Activity window powered by egui/eframe.
 
-use std::path::PathBuf;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -97,6 +99,36 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Try to acquire the GUI lock file. Returns the lock path if successful, None if another instance
+/// is already running.
+fn acquire_gui_lock() -> Option<PathBuf> {
+    let lock_dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("mirage");
+    let _ = fs::create_dir_all(&lock_dir);
+    let lock_path = lock_dir.join("gui.lock");
+
+    // Check if another GUI instance is running
+    if let Ok(pid_str) = fs::read_to_string(&lock_path)
+        && let Ok(pid) = pid_str.trim().parse::<u32>()
+        && Path::new(&format!("/proc/{}", pid)).exists()
+    {
+        return None; // Another instance is running
+    }
+
+    // Write our PID
+    if let Ok(mut f) = fs::File::create(&lock_path) {
+        let _ = write!(f, "{}", std::process::id());
+    }
+
+    Some(lock_path)
+}
+
+/// Release the GUI lock file.
+fn release_gui_lock(path: &Path) {
+    let _ = fs::remove_file(path);
 }
 
 impl eframe::App for MirageApp {
@@ -295,47 +327,51 @@ impl eframe::App for MirageApp {
                 ui.add_space(8.0);
 
                 if ui.button("Save").clicked() {
-                    let mut success = true;
-                    let cache_bytes_str = match self.settings_cache_limit_mb.parse::<u64>() {
-                        Ok(mb) => (mb * 1_048_576).to_string(),
+                    let sync_interval = match self.settings_sync_interval.parse::<u64>() {
+                        Ok(v) => v,
                         Err(_) => {
-                            success = false;
-                            String::new()
+                            self.settings_save_msg =
+                                Some(("Invalid sync interval value".to_string(), Instant::now()));
+                            return;
+                        }
+                    };
+                    let cache_mb = match self.settings_cache_limit_mb.parse::<u64>() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            self.settings_save_msg =
+                                Some(("Invalid cache limit value".to_string(), Instant::now()));
+                            return;
                         }
                     };
 
-                    if success {
-                        let fields = [
-                            ("sync_interval_secs", self.settings_sync_interval.clone()),
-                            ("cache_limit_bytes", cache_bytes_str),
-                            ("remote_base_path", self.settings_remote_path.clone()),
-                            ("log_level", LOG_LEVELS[self.settings_log_level].to_string()),
-                        ];
+                    let fields = vec![
+                        ("sync_interval_secs".to_string(), sync_interval.to_string()),
+                        (
+                            "cache_limit_bytes".to_string(),
+                            (cache_mb * 1_048_576).to_string(),
+                        ),
+                        (
+                            "remote_base_path".to_string(),
+                            self.settings_remote_path.clone(),
+                        ),
+                        (
+                            "log_level".to_string(),
+                            LOG_LEVELS[self.settings_log_level].to_string(),
+                        ),
+                    ];
 
-                        let mut all_ok = true;
-                        for (key, value) in &fields {
-                            match ipc::send_request(&ipc::TrayRequest::SetConfig {
-                                key: key.to_string(),
-                                value: value.clone(),
-                            }) {
-                                Ok(ipc::TrayResponse::Ok) => {}
-                                _ => {
-                                    all_ok = false;
-                                }
-                            }
-                        }
-                        self.settings_save_msg = Some((
-                            if all_ok {
-                                "Saved".to_string()
-                            } else {
-                                "Error saving some settings".to_string()
-                            },
-                            Instant::now(),
-                        ));
-                    } else {
-                        self.settings_save_msg =
-                            Some(("Invalid cache limit value".to_string(), Instant::now()));
-                    }
+                    let all_ok = matches!(
+                        ipc::send_request(&ipc::TrayRequest::SetConfig { fields }),
+                        Ok(ipc::TrayResponse::Ok)
+                    );
+                    self.settings_save_msg = Some((
+                        if all_ok {
+                            "Saved (restart daemon to apply)".to_string()
+                        } else {
+                            "Error saving some settings".to_string()
+                        },
+                        Instant::now(),
+                    ));
                 }
 
                 if let Some((ref msg, at)) = self.settings_save_msg
@@ -356,6 +392,10 @@ impl eframe::App for MirageApp {
 ///
 /// Call from a dedicated thread — this function runs the eframe event loop.
 pub fn open_activity_window(mount_point: PathBuf, window_open: Arc<AtomicBool>) {
+    let Some(lock_path) = acquire_gui_lock() else {
+        return;
+    };
+
     window_open.store(true, Ordering::SeqCst);
 
     let options = eframe::NativeOptions {
@@ -364,8 +404,10 @@ pub fn open_activity_window(mount_point: PathBuf, window_open: Arc<AtomicBool>) 
             .with_inner_size([400.0, 300.0])
             .with_min_inner_size([300.0, 220.0]),
         event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::wayland::EventLoopBuilderExtWayland;
             use winit::platform::x11::EventLoopBuilderExtX11;
             EventLoopBuilderExtX11::with_any_thread(builder, true);
+            EventLoopBuilderExtWayland::with_any_thread(builder, true);
         })),
         ..Default::default()
     };
@@ -381,11 +423,16 @@ pub fn open_activity_window(mount_point: PathBuf, window_open: Arc<AtomicBool>) 
         tracing::error!("Activity window error: {}", e);
     }
 
+    release_gui_lock(&lock_path);
     window_open.store(false, Ordering::SeqCst);
 }
 
 /// Open the settings window directly. Blocks until the window is closed.
 pub fn open_settings_window(mount_point: PathBuf) {
+    let Some(lock_path) = acquire_gui_lock() else {
+        return;
+    };
+
     let window_open = Arc::new(AtomicBool::new(false));
     window_open.store(true, Ordering::SeqCst);
 
@@ -395,8 +442,10 @@ pub fn open_settings_window(mount_point: PathBuf) {
             .with_inner_size([400.0, 300.0])
             .with_min_inner_size([300.0, 220.0]),
         event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::wayland::EventLoopBuilderExtWayland;
             use winit::platform::x11::EventLoopBuilderExtX11;
             EventLoopBuilderExtX11::with_any_thread(builder, true);
+            EventLoopBuilderExtWayland::with_any_thread(builder, true);
         })),
         ..Default::default()
     };
@@ -418,5 +467,6 @@ pub fn open_settings_window(mount_point: PathBuf) {
         tracing::error!("Settings window error: {}", e);
     }
 
+    release_gui_lock(&lock_path);
     window_open.store(false, Ordering::SeqCst);
 }

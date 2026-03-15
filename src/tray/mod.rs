@@ -280,13 +280,16 @@ pub fn run_tray() -> Result<()> {
                 .conflicts
         };
 
+        let mut has_conflicts = false;
+        let mut is_online = true;
+
         loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
 
             if let Some(new_status) = try_get_status() {
                 let new_conflicts = new_status.conflicts;
-                let is_online = new_status.online;
-                let has_conflicts = new_status.conflicts > 0;
+                is_online = new_status.online;
+                has_conflicts = new_status.conflicts > 0;
                 poll_paused.store(new_status.paused, std::sync::atomic::Ordering::Relaxed);
 
                 {
@@ -303,18 +306,6 @@ pub fn run_tray() -> Result<()> {
                 }
 
                 prev_conflicts = new_conflicts;
-
-                // Update overlay icon based on status
-                let new_icon_state = if has_conflicts {
-                    TrayIconState::Error
-                } else if !is_online {
-                    TrayIconState::Offline
-                } else {
-                    TrayIconState::Idle
-                };
-                handle.update(|tray| {
-                    tray.icon_state = new_icon_state;
-                });
             } else {
                 // Daemon not reachable
                 handle.update(|tray| {
@@ -323,16 +314,26 @@ pub fn run_tray() -> Result<()> {
             }
 
             if let Some(new_progress) = try_get_progress() {
-                let is_syncing = new_progress.phase != crate::sync::progress::SyncPhase::Idle;
+                let is_syncing = new_progress.phase != crate::sync::progress::SyncPhase::Idle
+                    && new_progress.phase != crate::sync::progress::SyncPhase::Paused;
                 {
                     let mut guard = poll_progress.lock().unwrap_or_else(|e| e.into_inner());
                     *guard = new_progress;
                 }
-                if is_syncing {
-                    handle.update(|tray| {
-                        tray.icon_state = TrayIconState::Syncing;
-                    });
-                }
+
+                // Determine icon state with priority: Error > Offline > Syncing > Idle
+                let new_icon_state = if has_conflicts {
+                    TrayIconState::Error
+                } else if !is_online {
+                    TrayIconState::Offline
+                } else if is_syncing {
+                    TrayIconState::Syncing
+                } else {
+                    TrayIconState::Idle
+                };
+                handle.update(|tray| {
+                    tray.icon_state = new_icon_state;
+                });
             }
         }
     });

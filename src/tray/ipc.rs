@@ -35,8 +35,7 @@ pub enum TrayRequest {
     ResumeSync,
     GetConfig,
     SetConfig {
-        key: String,
-        value: String,
+        fields: Vec<(String, String)>,
     },
     Quit,
 }
@@ -280,15 +279,24 @@ impl IpcServer {
                 let _ = self.write_response(&mut writer, &response);
                 false
             }
-            TrayRequest::SetConfig { key, value } => {
+            TrayRequest::SetConfig { fields } => {
                 let response = match crate::config::Config::load() {
-                    Ok(mut cfg) => match cfg.set_field(&key, &value) {
-                        Ok(()) => match cfg.save() {
-                            Ok(()) => TrayResponse::Ok,
-                            Err(e) => TrayResponse::Error(e.to_string()),
-                        },
-                        Err(e) => TrayResponse::Error(e.to_string()),
-                    },
+                    Ok(mut cfg) => {
+                        let mut errors = Vec::new();
+                        for (key, value) in &fields {
+                            if let Err(e) = cfg.set_field(key, value) {
+                                errors.push(format!("{}: {}", key, e));
+                            }
+                        }
+                        if errors.is_empty() {
+                            match cfg.save() {
+                                Ok(()) => TrayResponse::Ok,
+                                Err(e) => TrayResponse::Error(e.to_string()),
+                            }
+                        } else {
+                            TrayResponse::Error(errors.join("; "))
+                        }
+                    }
                     Err(e) => TrayResponse::Error(e.to_string()),
                 };
                 let _ = self.write_response(&mut writer, &response);
