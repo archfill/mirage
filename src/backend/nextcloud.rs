@@ -10,6 +10,7 @@ use bytes::Bytes;
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use reqwest::{Client, Method, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
+use tracing::{debug, warn};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -68,6 +69,7 @@ impl NextcloudClient {
         if status.is_success() || status == StatusCode::MULTI_STATUS {
             return Ok(());
         }
+        warn!(http_status = %status.as_u16(), %url, "request failed");
         match status.as_u16() {
             401 | 403 => Err(Error::AuthFailed),
             404 => Err(Error::NotFound(url.into())),
@@ -80,6 +82,7 @@ impl NextcloudClient {
 }
 
 impl Backend for NextcloudClient {
+    #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn list_dir(&self, remote_path: &str) -> Result<Vec<RemoteEntry>> {
         let url = self.url(remote_path);
         // PROPFIND is not a standard HTTP method — build it from bytes.
@@ -112,9 +115,12 @@ impl Backend for NextcloudClient {
             ) + "/"
         };
 
-        parse_propfind_response(&xml, &base_path)
+        let entries = parse_propfind_response(&xml, &base_path)?;
+        debug!(count = entries.len(), "listed");
+        Ok(entries)
     }
 
+    #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn get_metadata(&self, remote_path: &str) -> Result<RemoteEntry> {
         let url = self.url(remote_path);
         let method = Method::from_bytes(b"PROPFIND").expect("PROPFIND is a valid HTTP method"); // compile-time constant
@@ -140,11 +146,14 @@ impl Backend for NextcloudClient {
         let parent_path = parent_dav_path(&self.dav_base_path, remote_path);
         let mut entries = parse_propfind_response(&xml, &parent_path)?;
 
-        entries
+        let entry = entries
             .pop()
-            .ok_or_else(|| Error::NotFound(remote_path.into()))
+            .ok_or_else(|| Error::NotFound(remote_path.into()))?;
+        debug!("ok");
+        Ok(entry)
     }
 
+    #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn download(&self, remote_path: &str) -> Result<Bytes> {
         let url = self.url(remote_path);
 
@@ -159,9 +168,12 @@ impl Backend for NextcloudClient {
         let status = response.status();
         self.check_status(status, &url)?;
 
-        response.bytes().await.map_err(Error::Http)
+        let bytes = response.bytes().await.map_err(Error::Http)?;
+        debug!("ok");
+        Ok(bytes)
     }
 
+    #[tracing::instrument(skip(self, data), fields(path = %remote_path))]
     async fn upload(&self, remote_path: &str, data: Bytes) -> Result<RemoteEntry> {
         let url = self.url(remote_path);
 
@@ -178,9 +190,12 @@ impl Backend for NextcloudClient {
         self.check_status(status, &url)?;
 
         // After upload, fetch metadata to get the server-assigned ETag
-        self.get_metadata(remote_path).await
+        let entry = self.get_metadata(remote_path).await?;
+        debug!("ok");
+        Ok(entry)
     }
 
+    #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn delete(&self, remote_path: &str) -> Result<()> {
         let url = self.url(remote_path);
 
@@ -193,9 +208,12 @@ impl Backend for NextcloudClient {
             .map_err(Error::Http)?;
 
         let status = response.status();
-        self.check_status(status, &url)
+        self.check_status(status, &url)?;
+        debug!("ok");
+        Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(from = %from, to = %to))]
     async fn move_entry(&self, from: &str, to: &str) -> Result<()> {
         let url = self.url(from);
         let dest_url = self.url(to);
@@ -218,9 +236,12 @@ impl Backend for NextcloudClient {
             .map_err(Error::Http)?;
 
         let status = response.status();
-        self.check_status(status, &url)
+        self.check_status(status, &url)?;
+        debug!("ok");
+        Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn create_dir(&self, remote_path: &str) -> Result<()> {
         let url = self.url(remote_path);
         let method = Method::from_bytes(b"MKCOL").expect("MKCOL is a valid HTTP method"); // compile-time constant
@@ -234,9 +255,12 @@ impl Backend for NextcloudClient {
             .map_err(Error::Http)?;
 
         let status = response.status();
-        self.check_status(status, &url)
+        self.check_status(status, &url)?;
+        debug!("ok");
+        Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn ping(&self) -> Result<()> {
         let url = self.url("");
         let method = Method::from_bytes(b"PROPFIND").expect("PROPFIND is a valid HTTP method");
@@ -254,7 +278,9 @@ impl Backend for NextcloudClient {
             .map_err(Error::Http)?;
 
         let status = response.status();
-        self.check_status(status, &url)
+        self.check_status(status, &url)?;
+        debug!("ok");
+        Ok(())
     }
 }
 

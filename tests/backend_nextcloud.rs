@@ -39,6 +39,7 @@ fn test_config(server_url: &str) -> Config {
         request_timeout_secs: 60,
         ignore_file: None,
         remote_base_path: None,
+        log_level: None,
     }
 }
 

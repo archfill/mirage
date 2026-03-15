@@ -10,6 +10,7 @@ pub mod models;
 use std::path::Path;
 
 use rusqlite::{Connection, Row, params};
+use tracing::{debug, info};
 
 use crate::error::{Error, Result};
 use models::{FileEntry, NewFileEntry, SyncState};
@@ -50,6 +51,7 @@ impl Database {
         let conn = Connection::open(path)?;
         let db = Self { conn };
         db.initialize()?;
+        info!(path = %path.display(), "database opened");
         Ok(db)
     }
 
@@ -137,6 +139,7 @@ impl Database {
     // ── Write operations ─────────────────────────────────────────
 
     /// Insert a new file entry. Returns the assigned inode.
+    #[tracing::instrument(skip(self, entry), fields(parent = entry.parent_inode, name = %entry.name))]
     pub fn insert(&self, entry: &NewFileEntry) -> Result<u64> {
         let parent_i64 = Self::to_i64(entry.parent_inode)?;
         self.conn.execute(
@@ -156,7 +159,9 @@ impl Database {
                 entry.sync_state.to_string(),
             ],
         )?;
-        Ok(self.conn.last_insert_rowid() as u64)
+        let inode = self.conn.last_insert_rowid() as u64;
+        debug!(inode, "entry inserted");
+        Ok(inode)
     }
 
     /// Update metadata for an existing entry (keeps the same inode).
@@ -188,6 +193,7 @@ impl Database {
     }
 
     /// Update the sync state of an entry.
+    #[tracing::instrument(skip(self), fields(inode))]
     pub fn update_sync_state(&self, inode: u64, state: SyncState) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE files SET sync_state = ?1 WHERE inode = ?2",
@@ -196,6 +202,7 @@ impl Database {
         if changed == 0 {
             return Err(Error::InodeNotFound(inode));
         }
+        debug!(?state, "sync state updated");
         Ok(())
     }
 
@@ -241,6 +248,7 @@ impl Database {
     }
 
     /// Move/rename an entry (update parent_inode and name).
+    #[tracing::instrument(skip(self), fields(inode))]
     pub fn move_entry(&self, inode: u64, new_parent: u64, new_name: &str) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE files SET parent_inode = ?1, name = ?2 WHERE inode = ?3",
@@ -249,10 +257,12 @@ impl Database {
         if changed == 0 {
             return Err(Error::InodeNotFound(inode));
         }
+        debug!("entry moved");
         Ok(())
     }
 
     /// Update size, mtime, and sync_state for an entry (used after write flush).
+    #[tracing::instrument(skip(self), fields(inode))]
     pub fn update_file_after_write(&self, inode: u64, size: u64, mtime: i64) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE files SET size = ?1, mtime = ?2, sync_state = ?3 WHERE inode = ?4",
@@ -266,10 +276,12 @@ impl Database {
         if changed == 0 {
             return Err(Error::InodeNotFound(inode));
         }
+        debug!(size, mtime, "file updated after write");
         Ok(())
     }
 
     /// Delete an entry by inode.
+    #[tracing::instrument(skip(self), fields(inode))]
     pub fn delete(&self, inode: u64) -> Result<()> {
         let changed = self.conn.execute(
             "DELETE FROM files WHERE inode = ?1",
@@ -278,6 +290,7 @@ impl Database {
         if changed == 0 {
             return Err(Error::InodeNotFound(inode));
         }
+        debug!("entry deleted");
         Ok(())
     }
 

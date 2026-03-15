@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use tracing::info;
+
 const ONLINE: u8 = 0;
 const OFFLINE: u8 = 1;
 
@@ -34,11 +36,17 @@ impl NetworkMonitor {
     }
 
     pub fn set_online(&self) {
-        self.state.store(ONLINE, Ordering::Relaxed);
+        let prev = self.state.swap(ONLINE, Ordering::Relaxed);
+        if prev == OFFLINE {
+            info!("network state changed: offline -> online");
+        }
     }
 
     pub fn set_offline(&self) {
-        self.state.store(OFFLINE, Ordering::Relaxed);
+        let prev = self.state.swap(OFFLINE, Ordering::Relaxed);
+        if prev == ONLINE {
+            info!("network state changed: online -> offline");
+        }
     }
 
     /// Get a shared handle to the underlying atomic for cross-thread sharing.

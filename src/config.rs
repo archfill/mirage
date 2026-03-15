@@ -44,6 +44,9 @@ pub struct Config {
     /// Remote folder to sync (e.g. "MirageTest" to only sync that folder)
     #[serde(default)]
     pub remote_base_path: Option<String>,
+    /// Log level override (e.g. "debug", "info", "warn", "error")
+    #[serde(default)]
+    pub log_level: Option<String>,
 }
 
 fn default_connect_timeout_secs() -> u64 {
@@ -180,9 +183,26 @@ request_timeout_secs = 60
 
 # Remote folder to sync (omit to sync entire account)
 # remote_base_path = "MirageTest"
+
+# Log level override (e.g. "debug", "info", "warn", "error")
+# log_level = "info"
 "#
         .to_owned()
     }
+}
+
+/// Read only the log_level field from config.toml, returning None on any error.
+pub fn read_log_level_from_config() -> Option<String> {
+    let config_dir = dirs::config_dir()?;
+    let path = config_dir.join("mirage").join("config.toml");
+    let content = std::fs::read_to_string(path).ok()?;
+
+    #[derive(Deserialize)]
+    struct Partial {
+        log_level: Option<String>,
+    }
+
+    toml::from_str::<Partial>(&content).ok()?.log_level
 }
 
 #[cfg(test)]
@@ -206,6 +226,7 @@ mod tests {
             request_timeout_secs: 60,
             ignore_file: None,
             remote_base_path: None,
+            log_level: None,
         };
         assert!(cfg.is_always_local("Documents"));
         assert!(cfg.is_always_local("Documents/report.pdf"));
@@ -230,6 +251,7 @@ mod tests {
             request_timeout_secs: 60,
             ignore_file: None,
             remote_base_path: None,
+            log_level: None,
         };
         assert!(!cfg.is_always_local("anything"));
     }
@@ -278,6 +300,7 @@ mod tests {
             request_timeout_secs: 60,
             ignore_file: None,
             remote_base_path: None,
+            log_level: None,
         };
         assert_eq!(
             cfg.dav_base_url(),
@@ -303,6 +326,7 @@ mod tests {
             request_timeout_secs: 60,
             ignore_file: None,
             remote_base_path: Some("MirageTest".into()),
+            log_level: None,
         };
         assert_eq!(
             cfg.dav_base_url(),
