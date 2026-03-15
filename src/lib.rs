@@ -51,6 +51,17 @@ pub fn run(command: &Command) -> Result<()> {
         Command::Tray => {
             tray::run_tray()?;
         }
+        Command::Settings => {
+            let cfg = config::Config::load()?;
+            tray::gui::open_settings_window(cfg.mount_point);
+        }
+        Command::Gui => {
+            let cfg = config::Config::load()?;
+            tray::gui::open_activity_window(
+                cfg.mount_point,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
+        }
         Command::Logs { follow, lines } => {
             run_logs(*follow, *lines)?;
         }
@@ -572,6 +583,7 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
     let sync_cache_dir = cfg.cache_dir.clone();
     let sync_net_state = net_monitor.shared();
     let sync_always_local = cfg.always_local_paths.clone();
+    let sync_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sync_progress = sync::progress::SyncProgress::new();
     let ipc_progress = sync_progress.clone();
     let ignore_path = cfg.ignore_file.clone().unwrap_or_else(|| {
@@ -579,6 +591,7 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
             .map(|d| d.join("mirage").join(".mirageignore"))
             .unwrap_or_default()
     });
+    let thread_sync_paused = Arc::clone(&sync_paused);
     let sync_ping_backend = Arc::clone(&backend);
     std::thread::spawn(move || {
         let mut sync_engine =
@@ -601,6 +614,9 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
             let mut interval = tokio::time::interval(Duration::from_secs(sync_interval_secs));
             loop {
                 interval.tick().await;
+                if thread_sync_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
                 // Skip sync when offline — ping first
                 if sync_net_state.load(std::sync::atomic::Ordering::Relaxed) != 0 {
                     match sync_ping_backend.ping().await {
@@ -679,9 +695,15 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
     let ipc_db = db::Database::open(&db_path)?;
     let ipc_net_state = net_monitor.shared();
     let ipc_mount_point = mountpoint.to_path_buf();
+    let ipc_sync_paused = Arc::clone(&sync_paused);
     std::thread::spawn(move || {
-        match tray::ipc::IpcServer::new(ipc_db, ipc_net_state, Some(ipc_progress), ipc_mount_point)
-        {
+        match tray::ipc::IpcServer::new(
+            ipc_db,
+            ipc_net_state,
+            Some(ipc_progress),
+            ipc_mount_point,
+            ipc_sync_paused,
+        ) {
             Ok(server) => server.run(),
             Err(e) => tracing::warn!(error = %e, "failed to start IPC server"),
         }

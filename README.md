@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/mirage-icon.png" alt="Mirage" width="128">
+</p>
+
 # Mirage
 
 Linux向けのクラウドファイル同期クライアント。

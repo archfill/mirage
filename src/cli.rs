@@ -58,6 +58,10 @@ pub enum Command {
     },
     /// Launch the system tray application
     Tray,
+    /// Open the activity window (GUI)
+    Gui,
+    /// Open settings window (GUI)
+    Settings,
     /// Show mirage daemon logs
     Logs {
         /// Follow log output

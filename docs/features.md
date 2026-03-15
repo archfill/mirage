@@ -114,17 +114,25 @@
 - [x] Shell completions (bash, zsh, fish) via clap_complete
 - [x] Man page generation via clap_mangen
 - [x] Desktop files (application launcher + tray autostart)
-- [x] Application SVG icon
+- [x] Application PNG icons (16/22/32/48/128/256)
 - [x] Default `.mirageignore` template
 - [x] systemd user service with D-Bus session access for keyring
 
 ## System Tray
 
-- [x] Tray icon showing sync status (ksni/SNI)
+- [x] Tray icon with custom mirage icon (ksni/SNI)
+- [x] Overlay icons for sync status (syncing/offline/error)
 - [x] Right-click menu (status / quit)
 - [x] Sync progress display (IPC GetProgress + tray menu)
 - [x] Error and conflict notifications (notify-rust)
 - [x] KDE (SNI) / XFCE / Sway / i3 support (GNOME requires AppIndicator extension)
+- [x] Activity window (egui/eframe: status, progress bar, Open Folder)
+- [x] Left-click to open activity window (double-open prevention)
+- [x] Tooltip on hover (synced/pending/conflicts summary)
+- [x] Current file name display in menu during sync
+- [x] SNI id() identifier
+- [x] NeedsAttention state (icon blink on conflicts)
+- [ ] Menu actions (Pause Sync, Settings)
 
 ## Daemon
 
