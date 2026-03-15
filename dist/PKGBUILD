@@ -44,8 +44,11 @@ package() {
     install -Dm644 dist/mirage-tray.desktop "$pkgdir/etc/xdg/autostart/mirage-tray.desktop"
     install -Dm644 dist/mirage.desktop "$pkgdir/usr/share/applications/mirage.desktop"
 
-    # Icon
-    install -Dm644 dist/mirage.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/mirage.svg"
+    # Icons
+    for _size in 16 22 32 48 128 256; do
+        install -Dm644 "dist/icons/mirage-${_size}.png" \
+            "$pkgdir/usr/share/icons/hicolor/${_size}x${_size}/apps/mirage.png"
+    done
 
     # Default mirageignore
     install -Dm644 dist/mirageignore.default "$pkgdir/usr/share/mirage/mirageignore.default"

@@ -22,13 +22,16 @@ pub struct MirageTray {
 
 impl ksni::Tray for MirageTray {
     fn icon_name(&self) -> String {
+        "mirage".to_string()
+    }
+
+    fn overlay_icon_name(&self) -> String {
         match self.icon_state {
-            TrayIconState::Idle => "folder-sync",
-            TrayIconState::Syncing => "sync-synchronizing",
-            TrayIconState::Offline => "network-offline",
-            TrayIconState::Error => "dialog-warning",
+            TrayIconState::Idle => String::new(),
+            TrayIconState::Syncing => "emblem-synchronizing".to_string(),
+            TrayIconState::Offline => "network-offline".to_string(),
+            TrayIconState::Error => "emblem-error".to_string(),
         }
-        .to_string()
     }
 
     fn title(&self) -> String {
@@ -158,7 +161,7 @@ pub fn run_tray() -> Result<()> {
 
     let poll_status = Arc::clone(&status);
     let poll_progress = Arc::clone(&progress);
-    std::thread::spawn(move || {
+    let poll_handle = std::thread::spawn(move || {
         let mut prev_conflicts: u64 = {
             poll_status
                 .lock()
@@ -171,6 +174,8 @@ pub fn run_tray() -> Result<()> {
 
             if let Some(new_status) = try_get_status() {
                 let new_conflicts = new_status.conflicts;
+                let is_online = new_status.online;
+                let has_conflicts = new_status.conflicts > 0;
 
                 {
                     let mut guard = poll_status.lock().unwrap_or_else(|e| e.into_inner());
@@ -181,21 +186,47 @@ pub fn run_tray() -> Result<()> {
                     let _ = notify_rust::Notification::new()
                         .summary("Mirage")
                         .body("New conflict detected")
-                        .icon("dialog-warning")
+                        .icon("mirage")
                         .show();
                 }
 
                 prev_conflicts = new_conflicts;
+
+                // Update overlay icon based on status
+                let new_icon_state = if has_conflicts {
+                    TrayIconState::Error
+                } else if !is_online {
+                    TrayIconState::Offline
+                } else {
+                    TrayIconState::Idle
+                };
+                handle.update(|tray| {
+                    tray.icon_state = new_icon_state;
+                });
+            } else {
+                // Daemon not reachable
+                handle.update(|tray| {
+                    tray.icon_state = TrayIconState::Offline;
+                });
             }
 
             if let Some(new_progress) = try_get_progress() {
-                let mut guard = poll_progress.lock().unwrap_or_else(|e| e.into_inner());
-                *guard = new_progress;
+                let is_syncing = new_progress.phase != crate::sync::progress::SyncPhase::Idle;
+                {
+                    let mut guard = poll_progress.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = new_progress;
+                }
+                if is_syncing {
+                    handle.update(|tray| {
+                        tray.icon_state = TrayIconState::Syncing;
+                    });
+                }
             }
         }
     });
 
-    handle.shutdown();
+    // Block until the polling thread exits (which only happens on process exit).
+    let _ = poll_handle.join();
 
     Ok(())
 }
