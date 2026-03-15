@@ -73,6 +73,15 @@ fn default_retry_max_secs() -> u64 {
     600
 }
 
+fn expand_tilde(path: &std::path::Path) -> PathBuf {
+    if let Ok(rest) = path.strip_prefix("~")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path.to_path_buf()
+}
+
 impl Config {
     /// Load configuration from `~/.config/mirage/config.toml`.
     pub fn load() -> Result<Self> {
@@ -81,7 +90,12 @@ impl Config {
         let path = config_dir.join("mirage").join("config.toml");
         let content = std::fs::read_to_string(&path)
             .map_err(|e| Error::Config(format!("failed to read {}: {e}", path.display())))?;
-        toml::from_str(&content).map_err(|e| Error::Config(format!("failed to parse config: {e}")))
+        let mut cfg: Self = toml::from_str(&content)
+            .map_err(|e| Error::Config(format!("failed to parse config: {e}")))?;
+        cfg.cache_dir = expand_tilde(&cfg.cache_dir);
+        cfg.mount_point = expand_tilde(&cfg.mount_point);
+        cfg.ignore_file = cfg.ignore_file.map(|p| expand_tilde(&p));
+        Ok(cfg)
     }
 
     /// Resolve the password from environment variable or config field.

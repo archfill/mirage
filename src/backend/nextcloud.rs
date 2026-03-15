@@ -64,6 +64,32 @@ impl NextcloudClient {
         format!("{}{}", self.dav_base_url, remote_path)
     }
 
+    /// Send an HTTP request with automatic retry on 429 Too Many Requests.
+    ///
+    /// Accepts a closure that builds the request so the builder can be
+    /// re-created on each attempt (reqwest builders are not cloneable).
+    /// Retries up to 3 times with exponential backoff: 2s, 4s, 8s.
+    async fn send_with_retry(
+        &self,
+        build_request: impl Fn(&Client) -> reqwest::RequestBuilder,
+    ) -> std::result::Result<reqwest::Response, reqwest::Error> {
+        let mut delay = std::time::Duration::from_secs(2);
+        for attempt in 1..=3 {
+            let response = build_request(&self.client).send().await?;
+            if response.status().as_u16() != 429 || attempt == 3 {
+                return Ok(response);
+            }
+            tracing::warn!(
+                attempt,
+                delay_secs = delay.as_secs(),
+                "rate limited (429), retrying"
+            );
+            tokio::time::sleep(delay).await;
+            delay *= 2;
+        }
+        unreachable!()
+    }
+
     /// Map HTTP status codes to application errors.
     fn check_status(&self, status: StatusCode, url: &str) -> Result<()> {
         if status.is_success() || status == StatusCode::MULTI_STATUS {
@@ -85,18 +111,17 @@ impl Backend for NextcloudClient {
     #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn list_dir(&self, remote_path: &str) -> Result<Vec<RemoteEntry>> {
         let url = self.url(remote_path);
-        // PROPFIND is not a standard HTTP method — build it from bytes.
-        // Input is a compile-time constant, so expect() is safe here.
-        let method = Method::from_bytes(b"PROPFIND").expect("PROPFIND is a valid HTTP method"); // compile-time constant
 
         let response = self
-            .client
-            .request(method, &url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .header("Depth", "1")
-            .header(CONTENT_TYPE, "application/xml")
-            .body(PROPFIND_BODY)
-            .send()
+            .send_with_retry(|c| {
+                // PROPFIND is not a standard HTTP method — build it from bytes.
+                // Input is a compile-time constant, so unwrap() is safe here.
+                c.request(Method::from_bytes(b"PROPFIND").unwrap(), &url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+                    .header("Depth", "1")
+                    .header(CONTENT_TYPE, "application/xml")
+                    .body(PROPFIND_BODY)
+            })
             .await
             .map_err(Error::Http)?;
 
@@ -123,16 +148,15 @@ impl Backend for NextcloudClient {
     #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn get_metadata(&self, remote_path: &str) -> Result<RemoteEntry> {
         let url = self.url(remote_path);
-        let method = Method::from_bytes(b"PROPFIND").expect("PROPFIND is a valid HTTP method"); // compile-time constant
 
         let response = self
-            .client
-            .request(method, &url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .header("Depth", "0")
-            .header(CONTENT_TYPE, "application/xml")
-            .body(PROPFIND_BODY)
-            .send()
+            .send_with_retry(|c| {
+                c.request(Method::from_bytes(b"PROPFIND").unwrap(), &url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+                    .header("Depth", "0")
+                    .header(CONTENT_TYPE, "application/xml")
+                    .body(PROPFIND_BODY)
+            })
             .await
             .map_err(Error::Http)?;
 
@@ -158,10 +182,10 @@ impl Backend for NextcloudClient {
         let url = self.url(remote_path);
 
         let response = self
-            .client
-            .get(&url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .send()
+            .send_with_retry(|c| {
+                c.get(&url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+            })
             .await
             .map_err(Error::Http)?;
 
@@ -178,11 +202,11 @@ impl Backend for NextcloudClient {
         let url = self.url(remote_path);
 
         let response = self
-            .client
-            .put(&url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .body(data)
-            .send()
+            .send_with_retry(|c| {
+                c.put(&url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+                    .body(data.clone())
+            })
             .await
             .map_err(Error::Http)?;
 
@@ -200,10 +224,10 @@ impl Backend for NextcloudClient {
         let url = self.url(remote_path);
 
         let response = self
-            .client
-            .delete(&url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .send()
+            .send_with_retry(|c| {
+                c.delete(&url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+            })
             .await
             .map_err(Error::Http)?;
 
@@ -217,21 +241,18 @@ impl Backend for NextcloudClient {
     async fn move_entry(&self, from: &str, to: &str) -> Result<()> {
         let url = self.url(from);
         let dest_url = self.url(to);
-        let method = Method::from_bytes(b"MOVE").expect("MOVE is a valid HTTP method"); // compile-time constant
+        let dest_header = HeaderValue::from_str(&dest_url).map_err(|e| Error::WebDav {
+            status: 0,
+            message: format!("invalid destination header: {e}"),
+        })?;
 
         let response = self
-            .client
-            .request(method, &url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .header(
-                "Destination",
-                HeaderValue::from_str(&dest_url).map_err(|e| Error::WebDav {
-                    status: 0,
-                    message: format!("invalid destination header: {e}"),
-                })?,
-            )
-            .header("Overwrite", "F")
-            .send()
+            .send_with_retry(|c| {
+                c.request(Method::from_bytes(b"MOVE").unwrap(), &url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+                    .header("Destination", dest_header.clone())
+                    .header("Overwrite", "F")
+            })
             .await
             .map_err(Error::Http)?;
 
@@ -244,13 +265,12 @@ impl Backend for NextcloudClient {
     #[tracing::instrument(skip(self), fields(path = %remote_path))]
     async fn create_dir(&self, remote_path: &str) -> Result<()> {
         let url = self.url(remote_path);
-        let method = Method::from_bytes(b"MKCOL").expect("MKCOL is a valid HTTP method"); // compile-time constant
 
         let response = self
-            .client
-            .request(method, &url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .send()
+            .send_with_retry(|c| {
+                c.request(Method::from_bytes(b"MKCOL").unwrap(), &url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+            })
             .await
             .map_err(Error::Http)?;
 
@@ -263,17 +283,16 @@ impl Backend for NextcloudClient {
     #[tracing::instrument(skip(self))]
     async fn ping(&self) -> Result<()> {
         let url = self.url("");
-        let method = Method::from_bytes(b"PROPFIND").expect("PROPFIND is a valid HTTP method");
 
         let response = self
-            .client
-            .request(method, &url)
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
-            .header("Depth", "0")
-            .header(CONTENT_TYPE, "application/xml")
-            .body(PROPFIND_BODY)
-            .timeout(std::time::Duration::from_secs(3))
-            .send()
+            .send_with_retry(|c| {
+                c.request(Method::from_bytes(b"PROPFIND").unwrap(), &url)
+                    .basic_auth(&self.username, Some(self.password.expose_secret()))
+                    .header("Depth", "0")
+                    .header(CONTENT_TYPE, "application/xml")
+                    .body(PROPFIND_BODY)
+                    .timeout(std::time::Duration::from_secs(3))
+            })
             .await
             .map_err(Error::Http)?;
 

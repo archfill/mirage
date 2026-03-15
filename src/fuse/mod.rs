@@ -68,10 +68,7 @@ impl<B: Backend + 'static> MirageFs<B> {
     /// Mount the filesystem at the given path (blocking).
     pub fn mount(self, mountpoint: &std::path::Path) -> crate::error::Result<()> {
         let mut config = Config::default();
-        config.mount_options = vec![
-            MountOption::FSName("mirage".into()),
-            MountOption::AutoUnmount,
-        ];
+        config.mount_options = vec![MountOption::FSName("mirage".into())];
         fuser::mount2(self, mountpoint, &config)?;
         Ok(())
     }

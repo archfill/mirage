@@ -23,7 +23,7 @@ quick-xml = "0.39"
 bytes = "1"
 secrecy = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-ctrlc = "3"
+ctrlc = { version = "3", features = ["termination"] }
 percent-encoding = "2"
 libc = "0.2"
 dirs = "6"
