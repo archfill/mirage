@@ -371,6 +371,28 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
 
     use backend::Backend;
 
+    // Detect and clean up stale mounts from a previous crash.
+    // We check /proc/mounts instead of `mountpoint -q` because the latter
+    // fails with ENOTCONN on dead FUSE mounts (Transport endpoint not connected).
+    if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+        let canonical =
+            std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
+        let canonical_str = canonical.to_string_lossy();
+        if mounts.lines().any(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .is_some_and(|mp| mp == canonical_str.as_ref())
+        }) {
+            tracing::warn!(
+                path = %mountpoint.display(),
+                "stale mount detected, cleaning up with lazy unmount"
+            );
+            let _ = std::process::Command::new("fusermount3")
+                .args(["-uz", canonical_str.as_ref()])
+                .status();
+        }
+    }
+
     let cfg = config::Config::load()?;
     let sync_interval_secs = cfg.sync_interval_secs;
 
@@ -493,10 +515,16 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
         worker.run();
     });
 
-    // Register Ctrl+C handler to send Shutdown to upload worker.
+    // Register Ctrl+C handler to unmount FUSE and shut down upload worker.
     let shutdown_tx = upload_tx.clone();
+    let shutdown_mountpoint = mountpoint.to_path_buf();
     ctrlc::set_handler(move || {
         tracing::info!("received signal, shutting down");
+        // Unmount FUSE to unblock fuser::mount2 on the main thread.
+        let _ = std::process::Command::new("fusermount3")
+            .arg("-u")
+            .arg(&shutdown_mountpoint)
+            .status();
         let _ = shutdown_tx.send(upload::UploadMessage::Shutdown);
     })
     .map_err(|e| crate::error::Error::Config(format!("failed to set signal handler: {e}")))?;
@@ -528,6 +556,21 @@ fn run_mount(mountpoint: &std::path::Path) -> Result<()> {
 
     // Wait for upload worker to finish draining pending uploads.
     let _ = upload_handle.join();
+
+    // Explicitly unmount the FUSE filesystem after the main loop exits.
+    tracing::info!(path = %mountpoint.display(), "unmounting FUSE filesystem");
+    let unmount_status = std::process::Command::new("fusermount3")
+        .arg("-u")
+        .arg(mountpoint)
+        .status();
+    match unmount_status {
+        Ok(s) if s.success() => {
+            tracing::info!("FUSE filesystem unmounted successfully");
+        }
+        _ => {
+            tracing::warn!(path = %mountpoint.display(), "fusermount3 -u failed, mount may already be gone");
+        }
+    }
 
     Ok(())
 }
