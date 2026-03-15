@@ -178,6 +178,7 @@ impl<B: Backend> SyncEngine<B> {
             let children = self.db.list_children(inode)?;
             for child in children {
                 if child.is_dir {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     let child_path = if remote_path.is_empty() {
                         child.name.clone()
                     } else {
