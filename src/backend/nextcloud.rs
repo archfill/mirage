@@ -149,7 +149,7 @@ impl Backend for NextcloudClient {
         let entry = entries
             .pop()
             .ok_or_else(|| Error::NotFound(remote_path.into()))?;
-        debug!("ok");
+        debug!(etag = ?entry.etag, "fetched metadata");
         Ok(entry)
     }
 
@@ -169,7 +169,7 @@ impl Backend for NextcloudClient {
         self.check_status(status, &url)?;
 
         let bytes = response.bytes().await.map_err(Error::Http)?;
-        debug!("ok");
+        debug!(size = bytes.len(), "downloaded");
         Ok(bytes)
     }
 
@@ -191,7 +191,7 @@ impl Backend for NextcloudClient {
 
         // After upload, fetch metadata to get the server-assigned ETag
         let entry = self.get_metadata(remote_path).await?;
-        debug!("ok");
+        debug!(etag = ?entry.etag, "uploaded");
         Ok(entry)
     }
 
@@ -209,7 +209,7 @@ impl Backend for NextcloudClient {
 
         let status = response.status();
         self.check_status(status, &url)?;
-        debug!("ok");
+        debug!("deleted");
         Ok(())
     }
 
@@ -237,7 +237,7 @@ impl Backend for NextcloudClient {
 
         let status = response.status();
         self.check_status(status, &url)?;
-        debug!("ok");
+        debug!("moved");
         Ok(())
     }
 
@@ -256,7 +256,7 @@ impl Backend for NextcloudClient {
 
         let status = response.status();
         self.check_status(status, &url)?;
-        debug!("ok");
+        debug!("created");
         Ok(())
     }
 
@@ -279,7 +279,7 @@ impl Backend for NextcloudClient {
 
         let status = response.status();
         self.check_status(status, &url)?;
-        debug!("ok");
+        debug!("reachable");
         Ok(())
     }
 }
