@@ -98,19 +98,35 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Resolve the password from environment variable or config field.
+    /// Resolve the password from environment, keyring, or config field.
     ///
-    /// Priority: MIRAGE_PASSWORD env var > config `password` field.
+    /// Priority: MIRAGE_PASSWORD env var > system keyring > config `password` field.
     pub fn resolve_password(&self) -> Result<SecretString> {
+        // 1. Environment variable
         if let Ok(env_pw) = std::env::var("MIRAGE_PASSWORD")
             && !env_pw.is_empty()
         {
             return Ok(SecretString::from(env_pw));
         }
+
+        // 2. System keyring (Secret Service API)
+        match keyring::Entry::new("mirage", &self.username) {
+            Ok(entry) => match entry.get_password() {
+                Ok(pw) if !pw.is_empty() => return Ok(SecretString::from(pw)),
+                _ => {}
+            },
+            Err(e) => {
+                tracing::debug!(error = %e, "keyring lookup failed");
+            }
+        }
+
+        // 3. Config file
         match &self.password {
             Some(pw) if !pw.is_empty() => Ok(SecretString::from(pw.clone())),
             _ => Err(Error::Config(
-                "password not set: use MIRAGE_PASSWORD env var or config password field".into(),
+                "password not set: run `mirage setup` to store credentials in system keyring, \
+                 or use MIRAGE_PASSWORD env var"
+                    .into(),
             )),
         }
     }
@@ -145,6 +161,110 @@ impl Config {
         }
     }
 
+    /// Get a config field value by key name.
+    pub fn get_field(&self, key: &str) -> Result<String> {
+        match key {
+            "server_url" => Ok(self.server_url.clone()),
+            "username" => Ok(self.username.clone()),
+            "password" => Ok("********".to_owned()),
+            "cache_dir" => Ok(self.cache_dir.display().to_string()),
+            "cache_limit_bytes" => Ok(self.cache_limit_bytes.to_string()),
+            "mount_point" => Ok(self.mount_point.display().to_string()),
+            "sync_interval_secs" => Ok(self.sync_interval_secs.to_string()),
+            "retry_base_secs" => Ok(self.retry_base_secs.to_string()),
+            "retry_max_secs" => Ok(self.retry_max_secs.to_string()),
+            "always_local_paths" => Ok(format!("{:?}", self.always_local_paths)),
+            "connect_timeout_secs" => Ok(self.connect_timeout_secs.to_string()),
+            "request_timeout_secs" => Ok(self.request_timeout_secs.to_string()),
+            "ignore_file" => Ok(self
+                .ignore_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()),
+            "remote_base_path" => Ok(self.remote_base_path.clone().unwrap_or_default()),
+            "log_level" => Ok(self.log_level.clone().unwrap_or_default()),
+            _ => Err(Error::Config(format!("unknown config key: {key}"))),
+        }
+    }
+
+    /// Set a config field value by key name. Returns error for invalid or read-only keys.
+    pub fn set_field(&mut self, key: &str, value: &str) -> Result<()> {
+        match key {
+            "password" => {
+                return Err(Error::Config(
+                    "password cannot be set via `config set`. Use `mirage setup` instead.".into(),
+                ));
+            }
+            "always_local_paths" | "ignore_file" => {
+                return Err(Error::Config(format!(
+                    "{key} cannot be set via `config set`. Edit config.toml directly."
+                )));
+            }
+            "server_url" => self.server_url = value.to_owned(),
+            "username" => self.username = value.to_owned(),
+            "cache_dir" => self.cache_dir = PathBuf::from(value),
+            "cache_limit_bytes" => {
+                self.cache_limit_bytes = value.parse().map_err(|_| {
+                    Error::Config(format!("invalid value for cache_limit_bytes: {value}"))
+                })?;
+            }
+            "mount_point" => self.mount_point = PathBuf::from(value),
+            "sync_interval_secs" => {
+                self.sync_interval_secs = value.parse().map_err(|_| {
+                    Error::Config(format!("invalid value for sync_interval_secs: {value}"))
+                })?;
+            }
+            "retry_base_secs" => {
+                self.retry_base_secs = value.parse().map_err(|_| {
+                    Error::Config(format!("invalid value for retry_base_secs: {value}"))
+                })?;
+            }
+            "retry_max_secs" => {
+                self.retry_max_secs = value.parse().map_err(|_| {
+                    Error::Config(format!("invalid value for retry_max_secs: {value}"))
+                })?;
+            }
+            "connect_timeout_secs" => {
+                self.connect_timeout_secs = value.parse().map_err(|_| {
+                    Error::Config(format!("invalid value for connect_timeout_secs: {value}"))
+                })?;
+            }
+            "request_timeout_secs" => {
+                self.request_timeout_secs = value.parse().map_err(|_| {
+                    Error::Config(format!("invalid value for request_timeout_secs: {value}"))
+                })?;
+            }
+            "remote_base_path" => {
+                self.remote_base_path = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_owned())
+                };
+            }
+            "log_level" => {
+                self.log_level = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_owned())
+                };
+            }
+            _ => return Err(Error::Config(format!("unknown config key: {key}"))),
+        }
+        Ok(())
+    }
+
+    /// Save the config to the standard config path.
+    pub fn save(&self) -> Result<()> {
+        let path = Self::config_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let toml_str = toml::to_string_pretty(self)
+            .map_err(|e| Error::Config(format!("failed to serialize config: {e}")))?;
+        std::fs::write(&path, toml_str)?;
+        Ok(())
+    }
+
     /// Return the path to the config file.
     pub fn config_path() -> Result<std::path::PathBuf> {
         let config_dir = dirs::config_dir()
@@ -162,7 +282,7 @@ server_url = "https://cloud.example.com"
 # Username for authentication
 username = "your-username"
 
-# Password (prefer MIRAGE_PASSWORD environment variable instead)
+# Password (prefer `mirage setup` for keyring storage, or MIRAGE_PASSWORD env var)
 # password = "your-password"
 
 # Directory for cached file data

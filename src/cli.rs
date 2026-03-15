@@ -67,6 +67,8 @@ pub enum Command {
         #[arg(short = 'n', long, default_value = "50")]
         lines: u32,
     },
+    /// Interactive setup: test connection and store credentials in system keyring
+    Setup,
 }
 
 #[derive(Debug, Subcommand)]
@@ -91,6 +93,20 @@ pub enum DaemonAction {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
+    /// Show all configuration values
+    List,
+    /// Show a specific configuration value
+    Get {
+        /// Configuration key name
+        key: String,
+    },
+    /// Update a specific configuration value
+    Set {
+        /// Configuration key name
+        key: String,
+        /// New value
+        value: String,
+    },
     /// Generate a template config file
     Init {
         /// Overwrite existing config
