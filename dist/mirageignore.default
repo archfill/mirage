@@ -1,0 +1,17 @@
+# Mirage ignore patterns (glob syntax)
+# Files matching these patterns will not be synced
+
+# OS metadata
+.DS_Store
+Thumbs.db
+.directory
+
+# Editor swap/backup files
+*.swp
+*.swo
+*~
+.*.kate-swp
+
+# Temporary files
+*.tmp
+*.temp
