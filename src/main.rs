@@ -31,5 +31,13 @@ fn main() -> mirage::error::Result<()> {
     }
 
     let cli = Cli::parse();
-    mirage::run(&cli.command)
+    if let Err(e) = mirage::run(&cli.command) {
+        if e.is_config_error() || (is_daemon_start && matches!(e, mirage::error::Error::AuthFailed))
+        {
+            eprintln!("Error: {e}");
+            std::process::exit(78); // EX_CONFIG
+        }
+        return Err(e);
+    }
+    Ok(())
 }

@@ -58,6 +58,11 @@ impl Error {
             _ => false,
         }
     }
+
+    /// Whether this error indicates a configuration problem that won't resolve on retry.
+    pub fn is_config_error(&self) -> bool {
+        matches!(self, Error::Config(_))
+    }
 }
 
 #[cfg(test)]
@@ -101,5 +106,26 @@ mod tests {
     fn config_error_is_not_transient() {
         let err = Error::Config("bad config".into());
         assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn config_error_is_config_error() {
+        let err = Error::Config("bad config".into());
+        assert!(err.is_config_error());
+    }
+
+    #[test]
+    fn auth_failed_is_not_config_error() {
+        let err = Error::AuthFailed;
+        assert!(!err.is_config_error());
+    }
+
+    #[test]
+    fn io_error_is_not_config_error() {
+        let err = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not found",
+        ));
+        assert!(!err.is_config_error());
     }
 }

@@ -169,13 +169,46 @@ fn run_setup() -> Result<()> {
     std::fs::write(&config_path, &toml_str)?;
     println!("Config saved: {}", config_path.display());
 
-    // Store password in keyring
-    let entry = keyring::Entry::new("mirage", &username)
-        .map_err(|e| Error::Config(format!("failed to access keyring: {e}")))?;
-    entry
-        .set_password(&password)
-        .map_err(|e| Error::Config(format!("failed to store password in keyring: {e}")))?;
-    println!("Password stored in system keyring.");
+    // Store password in keyring with fallback to config file
+    let keyring_ok = match keyring::Entry::new("mirage", &username) {
+        Ok(entry) => match entry.set_password(&password) {
+            Ok(()) => {
+                // Verify we can read it back
+                match entry.get_password() {
+                    Ok(pw) if pw == password => {
+                        println!("Password stored in system keyring.");
+                        true
+                    }
+                    _ => {
+                        eprintln!(
+                            "Warning: password was written to keyring but could not be read back."
+                        );
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to store password in keyring: {e}");
+                false
+            }
+        },
+        Err(e) => {
+            eprintln!("Warning: failed to access keyring: {e}");
+            false
+        }
+    };
+
+    if !keyring_ok {
+        eprintln!(
+            "Falling back to storing password in credentials file.\n\
+             Tip: for better security, set the MIRAGE_PASSWORD environment variable instead."
+        );
+        config::Config::save_credentials(&password)?;
+        println!(
+            "Password saved to {}",
+            config::Config::credentials_path()?.display()
+        );
+    }
 
     Ok(())
 }

@@ -10,6 +10,7 @@ ExecStart=/usr/bin/mirage daemon start
 ExecStop=/usr/bin/mirage daemon stop
 Restart=on-failure
 RestartSec=5
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target
