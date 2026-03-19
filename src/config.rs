@@ -107,14 +107,20 @@ impl Config {
 
     /// Save password to the credentials file with restricted permissions (0600).
     pub fn save_credentials(password: &str) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
 
         let path = Self::credentials_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, password)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(password.as_bytes())?;
         Ok(())
     }
 
