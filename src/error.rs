@@ -58,6 +58,11 @@ impl Error {
             _ => false,
         }
     }
+
+    /// Whether this error indicates a configuration problem that won't resolve on retry.
+    pub fn is_config_error(&self) -> bool {
+        matches!(self, Error::Config(_) | Error::AuthFailed)
+    }
 }
 
 #[cfg(test)]

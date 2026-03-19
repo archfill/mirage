@@ -98,9 +98,37 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Resolve the password from environment, keyring, or config field.
+    /// Path to the credentials file.
+    pub fn credentials_path() -> Result<PathBuf> {
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| Error::Config("could not determine config directory".into()))?;
+        Ok(config_dir.join("mirage").join("credentials"))
+    }
+
+    /// Save password to the credentials file with restricted permissions (0600).
+    pub fn save_credentials(password: &str) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = Self::credentials_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, password)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    /// Read password from the credentials file.
+    pub fn read_credentials() -> Option<String> {
+        let path = Self::credentials_path().ok()?;
+        let pw = std::fs::read_to_string(path).ok()?;
+        let pw = pw.trim().to_owned();
+        if pw.is_empty() { None } else { Some(pw) }
+    }
+
+    /// Resolve the password from environment, config field, keyring, or credentials file.
     ///
-    /// Priority: MIRAGE_PASSWORD env var > system keyring > config `password` field.
+    /// Priority: MIRAGE_PASSWORD env var > config `password` field > system keyring > credentials file.
     pub fn resolve_password(&self) -> Result<SecretString> {
         // 1. Environment variable
         if let Ok(env_pw) = std::env::var("MIRAGE_PASSWORD")
@@ -109,26 +137,39 @@ impl Config {
             return Ok(SecretString::from(env_pw));
         }
 
-        // 2. System keyring (Secret Service API)
+        // 2. Config file password field (set explicitly via setup or config.toml)
+        if let Some(pw) = &self.password
+            && !pw.is_empty()
+        {
+            return Ok(SecretString::from(pw.clone()));
+        }
+
+        // 3. System keyring (Secret Service API)
         match keyring::Entry::new("mirage", &self.username) {
             Ok(entry) => match entry.get_password() {
                 Ok(pw) if !pw.is_empty() => return Ok(SecretString::from(pw)),
                 _ => {}
             },
             Err(e) => {
-                tracing::debug!(error = %e, "keyring lookup failed");
+                tracing::warn!(
+                    error = %e,
+                    username = %self.username,
+                    "keyring lookup failed — if using KDE/KWallet, ensure the Secret Service \
+                     integration is enabled, or set MIRAGE_PASSWORD env var, or re-run `mirage setup`"
+                );
             }
         }
 
-        // 3. Config file
-        match &self.password {
-            Some(pw) if !pw.is_empty() => Ok(SecretString::from(pw.clone())),
-            _ => Err(Error::Config(
-                "password not set: run `mirage setup` to store credentials in system keyring, \
-                 or use MIRAGE_PASSWORD env var"
-                    .into(),
-            )),
+        // 4. Credentials file (~/.config/mirage/credentials)
+        if let Some(pw) = Self::read_credentials() {
+            return Ok(SecretString::from(pw));
         }
+
+        Err(Error::Config(
+            "password not set: run `mirage setup` to store credentials, \
+             or use MIRAGE_PASSWORD env var"
+                .into(),
+        ))
     }
 
     /// Check if a remote path should be always-local based on config.
