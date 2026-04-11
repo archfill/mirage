@@ -36,7 +36,7 @@ lru = "0.16"
 keyring = { version = "3", features = ["linux-native"] }
 eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 winit = { version = "0.30", features = ["x11", "wayland"] }
-rpassword = "5"
+rpassword = "7"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"
